@@ -1,0 +1,18 @@
+{
+  "name": "agent-distribution-production-v1",
+  "version": "2.0.0-production",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace backend\" \"npm run dev --workspace frontend\"",
+    "install:all": "npm install && npm install --workspace backend && npm install --workspace frontend",
+    "db:init": "npm run db:init --workspace backend",
+    "seed": "npm run seed --workspace backend"
+  },
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
