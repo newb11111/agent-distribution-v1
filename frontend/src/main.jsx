@@ -37,6 +37,25 @@ function buildRegisterLink(agentCode) {
   return `${origin}${window.location.pathname}#/register?sponsor=${encodeURIComponent(agentCode || '')}`
 }
 
+
+function statusText(t, status) {
+  const keyMap = {
+    ACTIVE: 'active',
+    FROZEN: 'frozen',
+    PENDING_FEE: 'pendingFee',
+    HIDDEN: 'hidden',
+    PENDING: 'pending',
+    APPROVED: 'approved',
+    REJECTED: 'rejected',
+    PAID: 'paid',
+    PAID_BY_REWARD: 'paidByReward',
+    WAITING_PAYMENT_APPROVAL: 'waitingPaymentApproval',
+    PENDING_PACK: 'pendingPack',
+    PACKED_SHIPPED: 'packedShipped'
+  }
+  return keyMap[status] ? t(keyMap[status]) : (status || '-')
+}
+
 function Button({ children, variant = 'primary', ...props }) {
   return <button className={`btn ${variant}`} type="button" {...props}>{children}</button>
 }
@@ -139,23 +158,12 @@ function Landing({ lang, setLang, t }) {
           </div>
         </Card>
       </div>
-      <Card>
-        <h3>V1 Core Rules</h3>
-        <div className="feature-grid">
-          <div>Admin approve 后才分佣</div>
-          <div>货品 10 代，年费 5 代</div>
-          <div>{t('onlyViewTwoLevels')}</div>
-          <div>Frozen commission 归公司</div>
-          <div>1 credit = RM1</div>
-          <div>三语 UI 字典</div>
-        </div>
-      </Card>
     </Layout>
   )
 }
 
 function AdminLogin({ lang, setLang, t, onLogin }) {
-  const [form, setForm] = useState({ code: 'admin', password: 'admin123' })
+  const [form, setForm] = useState({ code: '', password: '' })
   const [error, setError] = useState('')
 
   async function submit() {
@@ -171,7 +179,7 @@ function AdminLogin({ lang, setLang, t, onLogin }) {
   }
 
   return (
-    <Layout lang={lang} setLang={setLang} t={t} title={t('adminLogin')} right={<a className="btn secondary" href="#/">Home</a>}>
+    <Layout lang={lang} setLang={setLang} t={t} title={t('adminLogin')} right={<a className="btn secondary" href="#/">{t('home')}</a>}>
       <Card className="narrow">
         <ErrorBox error={error} />
         <Field label={t('adminCode')}><input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} /></Field>
@@ -183,17 +191,14 @@ function AdminLogin({ lang, setLang, t, onLogin }) {
 }
 
 function TacLogin({ t, mode, onSuccess }) {
-  const [email, setEmail] = useState(mode === 'agent' ? 'agent@example.com' : '')
+  const [email, setEmail] = useState('')
   const [tac, setTac] = useState('')
-  const [devTac, setDevTac] = useState('')
   const [error, setError] = useState('')
 
   async function sendTac() {
     setError('')
     try {
-      const data = await api('/api/auth/request-tac', { method: 'POST', body: { email } })
-      setDevTac(data.devTac || '')
-      setTac(data.devTac || '')
+      await api('/api/auth/request-tac', { method: 'POST', body: { email } })
     } catch (err) {
       setError(err.message)
     }
@@ -218,7 +223,6 @@ function TacLogin({ t, mode, onSuccess }) {
         <Field label={t('tac')}><input value={tac} onChange={(e) => setTac(e.target.value)} /></Field>
         <Button variant="secondary" onClick={sendTac}>{t('sendTac')}</Button>
       </div>
-      {devTac && <div className="notice">{t('devTac')}: <strong>{devTac}</strong></div>}
       <Button onClick={login}>{t('login')}</Button>
     </Card>
   )
@@ -226,16 +230,13 @@ function TacLogin({ t, mode, onSuccess }) {
 
 function Register({ lang, setLang, t }) {
   const [form, setForm] = useState({ email: '', tac: '', name: '', sponsorCode: getHashQueryParam('sponsor').toUpperCase() })
-  const [devTac, setDevTac] = useState('')
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
 
   async function sendTac() {
     setError('')
     try {
-      const data = await api('/api/auth/request-tac', { method: 'POST', body: { email: form.email } })
-      setDevTac(data.devTac)
-      setForm((x) => ({ ...x, tac: data.devTac || x.tac }))
+      await api('/api/auth/request-tac', { method: 'POST', body: { email: form.email } })
     } catch (err) {
       setError(err.message)
     }
@@ -255,7 +256,7 @@ function Register({ lang, setLang, t }) {
   }
 
   return (
-    <Layout lang={lang} setLang={setLang} t={t} title={t('registerAgent')} right={<a className="btn secondary" href="#/">Home</a>}>
+    <Layout lang={lang} setLang={setLang} t={t} title={t('registerAgent')} right={<a className="btn secondary" href="#/">{t('home')}</a>}>
       <Card className="narrow">
         <ErrorBox error={error} />
         {success && <div className="success-box">{success}</div>}
@@ -264,9 +265,8 @@ function Register({ lang, setLang, t }) {
           <Field label={t('tac')}><input value={form.tac} onChange={(e) => setForm({ ...form, tac: e.target.value })} /></Field>
           <Button variant="secondary" onClick={sendTac}>{t('sendTac')}</Button>
         </div>
-        {devTac && <div className="notice">{t('devTac')}: <strong>{devTac}</strong></div>}
-        <Field label={t('name')}><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-        <Field label={t('sponsorCode')}><input value={form.sponsorCode} onChange={(e) => setForm({ ...form, sponsorCode: e.target.value.toUpperCase() })} placeholder="AG1001 / invite code" /></Field>
+          <Field label={t('name')}><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+        <Field label={t('sponsorCode')}><input value={form.sponsorCode} onChange={(e) => setForm({ ...form, sponsorCode: e.target.value.toUpperCase() })} placeholder={t('sponsorPlaceholder')} /></Field>
         <Button onClick={register}>{t('register')}</Button>
       </Card>
     </Layout>
@@ -328,7 +328,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
       lang={lang}
       setLang={setLang}
       t={t}
-      title={isSuper ? 'Super Admin HQ' : 'Leader'}
+      title={isSuper ? t('superAdminHq') : t('LEADER')}
       subtitle={isSuper ? t('superAdminIntro') : t('subAdminIntro')}
       right={<><Button variant="secondary" onClick={load}>{t('refresh')}</Button><Button variant="danger" onClick={onLogout}>{t('logout')}</Button></>}
       navTabs={tabs}
@@ -700,7 +700,7 @@ function AdminRules({ t, rulesData, reload }) {
   const editor = (title, kind, list) => (
     <div>
       <h4>{title}</h4>
-      <Table><thead><tr><th>{t('generation')}</th><th>{t('type')}</th><th>{t('value')}</th></tr></thead><tbody>{list.map((r, idx) => <tr key={r.generation}><td>Level {r.generation}</td><td><select value={r.type} onChange={(e) => updateRule(kind, idx, { type: e.target.value })}><option value="percent">{t('percent')}</option><option value="amount">{t('fixedAmount')}</option></select></td><td><input type="number" value={r.value} onChange={(e) => updateRule(kind, idx, { value: e.target.value })} /></td></tr>)}</tbody></Table>
+      <Table><thead><tr><th>{t('generation')}</th><th>{t('type')}</th><th>{t('value')}</th></tr></thead><tbody>{list.map((r, idx) => <tr key={r.generation}><td>{t('level')} {r.generation}</td><td><select value={r.type} onChange={(e) => updateRule(kind, idx, { type: e.target.value })}><option value="percent">{t('percent')}</option><option value="amount">{t('fixedAmount')}</option></select></td><td><input type="number" value={r.value} onChange={(e) => updateRule(kind, idx, { value: e.target.value })} /></td></tr>)}</tbody></Table>
     </div>
   )
 
@@ -789,7 +789,7 @@ function AgentApp({ lang, setLang, t }) {
   const [logged, setLogged] = useState(Boolean(localStorage.getItem('agent_token')))
   if (!logged) {
     return (
-      <Layout lang={lang} setLang={setLang} t={t} title={t('agentLogin')} right={<a className="btn secondary" href="#/">Home</a>}>
+      <Layout lang={lang} setLang={setLang} t={t} title={t('agentLogin')} right={<a className="btn secondary" href="#/">{t('home')}</a>}>
         <TacLogin t={t} mode="agent" onSuccess={() => setLogged(true)} />
       </Layout>
     )
@@ -862,7 +862,7 @@ function AgentHome({ t, data, reload }) {
         <StatCard label={t('rewardCredit')} value={money(agent.balance)} hint={t('creditEqualRm')} />
         <StatCard label={t('agentCode')} value={agent.agentCode} hint={agent.referralCode} />
         <StatCard label={t('annualFeeReminder')} value={`${agent.annualFeeDaysLeft} ${t('days')}`} hint={t('renewalWarning')} />
-        <StatCard label={t('status')} value={agent.status} />
+        <StatCard label={t('status')} value={statusText(t, agent.status)} />
       </div>
       <Card>
         <h3>{t('annualFee')}</h3>
@@ -884,7 +884,7 @@ function AnnualFeeProofForm({ t, amount, reload }) {
     try {
       await api('/api/agent/payment-proof/annual-fee', { method: 'POST', body: { amount, proofText } }, 'agent')
       setProofText('')
-      setMessage('Submitted')
+      setMessage(t('submitted'))
       reload()
     } catch (err) { setError(err.message) }
   }
@@ -1021,7 +1021,7 @@ function AgentWallet({ t, wallet, me, reload }) {
     try {
       await api('/api/agent/withdrawals', { method: 'POST', body: { amount } }, 'agent')
       setAmount('')
-      setMessage('Submitted')
+      setMessage(t('submitted'))
       reload()
     } catch (err) { setError(err.message) }
   }
