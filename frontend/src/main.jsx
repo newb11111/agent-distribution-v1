@@ -16,25 +16,38 @@ function useLang() {
   return [lang, setLang]
 }
 
-function useHashRoute() {
-  const [route, setRoute] = useState(window.location.hash || '#/')
+function getCleanPathFromWindow() {
+  const hash = String(window.location.hash || '')
+  if (hash.startsWith('#/')) {
+    const cleanPath = hash.slice(1) || '/'
+    window.history.replaceState(null, '', cleanPath)
+    return window.location.pathname || '/'
+  }
+  return window.location.pathname || '/'
+}
+
+function useRoutePath() {
+  const [route, setRoute] = useState(getCleanPathFromWindow())
   useEffect(() => {
-    const onHash = () => setRoute(window.location.hash || '#/')
-    window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
+    const onRoute = () => setRoute(getCleanPathFromWindow())
+    window.addEventListener('popstate', onRoute)
+    window.addEventListener('hashchange', onRoute)
+    return () => {
+      window.removeEventListener('popstate', onRoute)
+      window.removeEventListener('hashchange', onRoute)
+    }
   }, [])
   return route
 }
 
 
-function getHashQueryParam(name) {
-  const query = String(window.location.hash || '').split('?')[1] || ''
-  return new URLSearchParams(query).get(name) || ''
+function getQueryParam(name) {
+  return new URLSearchParams(window.location.search || '').get(name) || ''
 }
 
 function buildRegisterLink(agentCode) {
   const origin = window.location.origin
-  return `${origin}${window.location.pathname}#/register?sponsor=${encodeURIComponent(agentCode || '')}`
+  return `${origin}/register?sponsor=${encodeURIComponent(agentCode || '')}`
 }
 
 
@@ -63,6 +76,61 @@ function Button({ children, variant = 'primary', ...props }) {
 function ErrorBox({ error }) {
   if (!error) return null
   return <div className="error-box">{error}</div>
+}
+
+const TAC_COOLDOWN_SECONDS = 60
+
+function useTacCooldown(seconds = TAC_COOLDOWN_SECONDS) {
+  const [left, setLeft] = useState(0)
+  useEffect(() => {
+    if (left <= 0) return undefined
+    const timer = window.setInterval(() => {
+      setLeft((value) => value <= 1 ? 0 : value - 1)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [left])
+  return [left, () => setLeft(seconds)]
+}
+
+function TacSendControl({ t, onSend, disabled = false }) {
+  const [left, startCooldown] = useTacCooldown()
+  const [sending, setSending] = useState(false)
+  const locked = disabled || sending || left > 0
+
+  async function handleSend() {
+    if (locked) return
+    setSending(true)
+    try {
+      const ok = await onSend?.()
+      if (ok !== false) startCooldown()
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <div className="tac-send-wrap">
+      <Button variant={left > 0 ? 'cooldown' : 'secondary'} onClick={handleSend} disabled={locked}>
+        {sending ? `${t('sendTac')}...` : t('sendTac')}
+      </Button>
+      {left > 0 && <span className="tac-countdown">{left}s</span>}
+    </div>
+  )
+}
+
+function normalizeWhatsappNumber(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  const waMatch = raw.match(/wa\.me\/([^?\s]+)/i)
+  let digits = (waMatch ? waMatch[1] : raw).replace(/\D/g, '')
+  if (digits.startsWith('0')) digits = `60${digits.slice(1)}`
+  return digits
+}
+
+function buildWhatsappUrl(phone, text) {
+  const digits = normalizeWhatsappNumber(phone)
+  if (!digits) return ''
+  return `https://wa.me/${digits}?text=${encodeURIComponent(text || '')}`
 }
 
 function CenterNotice({ open, title, message, type = 'info', onClose, children }) {
@@ -142,19 +210,14 @@ function normalizeTab(tab) {
 
 function Landing({ lang, setLang, t }) {
   return (
-    <Layout lang={lang} setLang={setLang} t={t} title={t('appName')} subtitle={t('landingSubtitle')}>
-      <div className="hero-grid">
-        <Card className="hero-card">
-          <h2>{t('adminLogin')}</h2>
-          <p>{t('adminIntro')}</p>
-          <a className="btn primary" href="#/admin">{t('adminLogin')}</a>
-        </Card>
-        <Card className="hero-card dark">
+    <Layout lang={lang} setLang={setLang} t={t} title={t('agentLogin')} subtitle={t('agentIntro')}>
+      <div className="single-landing">
+        <Card className="hero-card dark agent-only-card">
           <h2>{t('agentLogin')}</h2>
           <p>{t('agentIntro')}</p>
           <div className="row gap">
-            <a className="btn light" href="#/agent">{t('agentLogin')}</a>
-            <a className="btn ghost-light" href="#/register">{t('registerAgent')}</a>
+            <a className="btn light" href="/agent">{t('agentLogin')}</a>
+            <a className="btn ghost-light" href="/register">{t('registerAgent')}</a>
           </div>
         </Card>
       </div>
@@ -179,7 +242,7 @@ function AdminLogin({ lang, setLang, t, onLogin }) {
   }
 
   return (
-    <Layout lang={lang} setLang={setLang} t={t} title={t('adminLogin')} right={<a className="btn secondary" href="#/">{t('home')}</a>}>
+    <Layout lang={lang} setLang={setLang} t={t} title={t('adminLogin')} right={<a className="btn secondary" href="/">{t('home')}</a>}>
       <Card className="narrow">
         <ErrorBox error={error} />
         <Field label={t('adminCode')}><input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} /></Field>
@@ -199,8 +262,10 @@ function TacLogin({ t, mode, onSuccess }) {
     setError('')
     try {
       await api('/api/auth/request-tac', { method: 'POST', body: { email } })
+      return true
     } catch (err) {
       setError(err.message)
+      return false
     }
   }
 
@@ -221,7 +286,7 @@ function TacLogin({ t, mode, onSuccess }) {
       <Field label={t('email')}><input value={email} onChange={(e) => setEmail(e.target.value)} /></Field>
       <div className="row gap align-end">
         <Field label={t('tac')}><input value={tac} onChange={(e) => setTac(e.target.value)} /></Field>
-        <Button variant="secondary" onClick={sendTac}>{t('sendTac')}</Button>
+        <TacSendControl t={t} onSend={sendTac} disabled={!email} />
       </div>
       <Button onClick={login}>{t('login')}</Button>
     </Card>
@@ -229,7 +294,7 @@ function TacLogin({ t, mode, onSuccess }) {
 }
 
 function Register({ lang, setLang, t }) {
-  const [form, setForm] = useState({ email: '', tac: '', name: '', sponsorCode: getHashQueryParam('sponsor').toUpperCase() })
+  const [form, setForm] = useState({ email: '', tac: '', name: '', sponsorCode: getQueryParam('sponsor').toUpperCase() })
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
 
@@ -237,8 +302,10 @@ function Register({ lang, setLang, t }) {
     setError('')
     try {
       await api('/api/auth/request-tac', { method: 'POST', body: { email: form.email } })
+      return true
     } catch (err) {
       setError(err.message)
+      return false
     }
   }
 
@@ -249,21 +316,21 @@ function Register({ lang, setLang, t }) {
       const data = await api('/api/auth/register', { method: 'POST', body: form })
       setToken('agent', data.token)
       setSuccess(t('registeredSubmitAnnualFee'))
-      window.location.hash = '#/agent'
+      window.location.href = '/agent'
     } catch (err) {
       setError(err.message)
     }
   }
 
   return (
-    <Layout lang={lang} setLang={setLang} t={t} title={t('registerAgent')} right={<a className="btn secondary" href="#/">{t('home')}</a>}>
+    <Layout lang={lang} setLang={setLang} t={t} title={t('registerAgent')} right={<a className="btn secondary" href="/">{t('home')}</a>}>
       <Card className="narrow">
         <ErrorBox error={error} />
         {success && <div className="success-box">{success}</div>}
         <Field label={t('email')}><input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
         <div className="row gap align-end">
           <Field label={t('tac')}><input value={form.tac} onChange={(e) => setForm({ ...form, tac: e.target.value })} /></Field>
-          <Button variant="secondary" onClick={sendTac}>{t('sendTac')}</Button>
+          <TacSendControl t={t} onSend={sendTac} disabled={!form.email} />
         </div>
           <Field label={t('name')}><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
         <Field label={t('sponsorCode')}><input value={form.sponsorCode} onChange={(e) => setForm({ ...form, sponsorCode: e.target.value.toUpperCase() })} placeholder={t('sponsorPlaceholder')} /></Field>
@@ -789,7 +856,7 @@ function AgentApp({ lang, setLang, t }) {
   const [logged, setLogged] = useState(Boolean(localStorage.getItem('agent_token')))
   if (!logged) {
     return (
-      <Layout lang={lang} setLang={setLang} t={t} title={t('agentLogin')} right={<a className="btn secondary" href="#/">{t('home')}</a>}>
+      <Layout lang={lang} setLang={setLang} t={t} title={t('agentLogin')} right={<a className="btn secondary" href="/">{t('home')}</a>}>
         <TacLogin t={t} mode="agent" onSuccess={() => setLogged(true)} />
       </Layout>
     )
@@ -854,7 +921,7 @@ function AgentHome({ t, data, reload }) {
   const agent = data.me.agent
   const adminWhatsapp = data.me.adminWhatsapp
   const annualFeeAmount = data.me.annualFeeAmount
-  const whatsappUrl = `https://wa.me/${adminWhatsapp}?text=${encodeURIComponent(`Hi Admin, I want to pay annual fee ${annualFeeAmount}. Sales Adviser: ${agent.agentCode}`)}`
+  const whatsappUrl = buildWhatsappUrl(adminWhatsapp, `Hi Admin, I want to pay annual fee ${annualFeeAmount}. Sales Adviser: ${agent.agentCode}`)
   return (
     <>
       {agent.status !== 'ACTIVE' && <div className="warning-box">{t('frozenWarning')}</div>}
@@ -868,35 +935,12 @@ function AgentHome({ t, data, reload }) {
         <h3>{t('annualFee')}</h3>
         <p>{t('manualBankTransfer')}</p>
         <p>{t('annualFeeAmount')}: <strong>{money(annualFeeAmount)}</strong></p>
-        <a className="btn primary" href={whatsappUrl} target="_blank" rel="noreferrer">{t('contactAdminWhatsapp')}</a>
-        <AnnualFeeProofForm t={t} amount={annualFeeAmount} reload={reload} />
+        {whatsappUrl ? <a className="btn primary" href={whatsappUrl} target="_blank" rel="noreferrer">{t('contactAdminWhatsapp')}</a> : <span className="muted">{t('adminWhatsapp')}: -</span>}
       </Card>
     </>
   )
 }
 
-function AnnualFeeProofForm({ t, amount, reload }) {
-  const [proofText, setProofText] = useState('')
-  const [message, setMessage] = useState('')
-  const [error, setError] = useState('')
-  async function submit() {
-    setError(''); setMessage('')
-    try {
-      await api('/api/agent/payment-proof/annual-fee', { method: 'POST', body: { amount, proofText } }, 'agent')
-      setProofText('')
-      setMessage(t('submitted'))
-      reload()
-    } catch (err) { setError(err.message) }
-  }
-  return (
-    <div className="inline-form">
-      <ErrorBox error={error} />
-      {message && <div className="success-box">{message}</div>}
-      <Field label={t('proof')}><textarea value={proofText} onChange={(e) => setProofText(e.target.value)} placeholder={t('proofHint')} /></Field>
-      <Button onClick={submit}>{t('submitAnnualFeeProof')}</Button>
-    </div>
-  )
-}
 
 function AgentProfile({ t, me, reload }) {
   const [form, setForm] = useState({ name: me.name, ...me.profile })
@@ -1044,12 +1088,12 @@ function AgentWallet({ t, wallet, me, reload }) {
 
 function App() {
   const [lang, setLang] = useLang()
-  const route = useHashRoute()
+  const route = useRoutePath()
   const t = useMemo(() => createTranslator(lang), [lang])
 
-  if (route.startsWith('#/admin')) return <AdminApp lang={lang} setLang={setLang} t={t} />
-  if (route.startsWith('#/agent')) return <AgentApp lang={lang} setLang={setLang} t={t} />
-  if (route.startsWith('#/register')) return <Register lang={lang} setLang={setLang} t={t} />
+  if (route.startsWith('/admin')) return <AdminApp lang={lang} setLang={setLang} t={t} />
+  if (route.startsWith('/agent')) return <AgentApp lang={lang} setLang={setLang} t={t} />
+  if (route.startsWith('/register')) return <Register lang={lang} setLang={setLang} t={t} />
   return <Landing lang={lang} setLang={setLang} t={t} />
 }
 

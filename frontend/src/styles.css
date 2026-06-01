@@ -364,3 +364,50 @@ tr:last-child td { border-bottom: 0; }
   box-shadow: 0 10px 24px rgba(16,32,51,.05);
   resize: vertical;
 }
+
+/* V2.1: TAC cooldown + sales adviser only landing */
+.single-landing {
+  max-width: 620px;
+  margin: 0 auto;
+  width: 100%;
+}
+.agent-only-card {
+  min-height: 300px;
+}
+.tac-send-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.btn.cooldown,
+.btn:disabled {
+  background: #edf3f8;
+  color: #92a0ad;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+  opacity: .82;
+}
+.btn.cooldown:hover,
+.btn:disabled:hover {
+  transform: none;
+}
+.tac-countdown {
+  min-width: 42px;
+  padding: 9px 11px;
+  border-radius: 999px;
+  background: #f5f8fb;
+  border: 1px solid #dce8f4;
+  color: #526577;
+  font-weight: 900;
+  text-align: center;
+}
+@media (max-width: 760px) {
+  .tac-send-wrap {
+    width: 100%;
+  }
+  .tac-send-wrap .btn {
+    flex: 1;
+  }
+}

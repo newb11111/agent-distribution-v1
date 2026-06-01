@@ -592,7 +592,14 @@ app.post('/api/fulfillment/orders/:id/approve', requireAdmin, requireFulfillment
 })
 
 app.get('/api/agent/me', requireAgent, async (req, res, next) => {
-  try { res.json({ agent: await hydrateAgent((await query('SELECT * FROM sales_advisers WHERE id=$1', [req.agent.id])).rows[0]) }) } catch (err) { next(err) }
+  try {
+    const row = (await query('SELECT * FROM sales_advisers WHERE id=$1', [req.agent.id])).rows[0]
+    res.json({
+      agent: await hydrateAgent(row),
+      annualFeeAmount: await getSetting('annualFeeAmount', 365),
+      adminWhatsapp: await getSetting('adminWhatsapp', '60123456789')
+    })
+  } catch (err) { next(err) }
 })
 
 app.patch('/api/agent/profile', requireAgent, async (req, res, next) => {
