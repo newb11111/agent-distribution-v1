@@ -221,6 +221,17 @@ export async function initDatabase() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS financial_transactions (
+      id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      base_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+      summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(source_type, source_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_financial_transactions_source ON financial_transactions(source_type, source_id);
+
     CREATE TABLE IF NOT EXISTS withdrawals (
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL REFERENCES sales_advisers(id) ON DELETE RESTRICT,

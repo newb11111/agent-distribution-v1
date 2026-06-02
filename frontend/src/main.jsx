@@ -62,11 +62,43 @@ function statusText(t, status) {
     REJECTED: 'rejected',
     PAID: 'paid',
     PAID_BY_REWARD: 'paidByReward',
+    PAID_TO_AGENT: 'paidToAgent',
+    FORFEITED_TO_COMPANY: 'forfeitedToCompany',
+    SKIPPED_INACTIVE_COMPRESSED: 'skippedInactiveCompressed',
     WAITING_PAYMENT_APPROVAL: 'waitingPaymentApproval',
     PENDING_PACK: 'pendingPack',
     PACKED_SHIPPED: 'packedShipped'
   }
   return keyMap[status] ? t(keyMap[status]) : (status || '-')
+}
+
+function translatedCode(t, prefix, value) {
+  const raw = String(value || '').trim()
+  if (!raw) return '-'
+  const key = `${prefix}_${raw}`
+  const translated = t(key)
+  return translated && translated !== key ? translated : raw.replaceAll('_', ' ')
+}
+
+function sourceTypeText(t, value) { return translatedCode(t, 'source', value) }
+function ledgerTypeText(t, value) { return translatedCode(t, 'ledger', value) }
+function proofTypeText(t, value) { return translatedCode(t, 'type', value) }
+function noteText(t, value) {
+  const raw = String(value || '').trim()
+  if (!raw) return '-'
+  const compressedLedger = raw.match(/^(PRODUCT_ORDER|ANNUAL_FEE_[A-Z_]+) commission level (\d+) \(compressed from level (\d+)\)$/i)
+  if (compressedLedger) return `${t('note_CommissionCompressed')} · ${t('level')} ${compressedLedger[2]} ← ${t('level')} ${compressedLedger[3]}`
+  if (/^PRODUCT_ORDER commission level /i.test(raw)) return `${t('note_CommissionCredited')} · ${t('level')} ${raw.split(' ').pop()}`
+  if (/^ANNUAL_FEE_/i.test(raw) && /commission level /i.test(raw)) return `${t('note_CommissionCredited')} · ${t('level')} ${raw.split(' ').pop()}`
+  const compressedCommission = raw.match(/^Commission credited to reward; compressed from level (\d+) to level (\d+)$/i)
+  if (compressedCommission) return `${t('note_CommissionCompressed')} · ${t('level')} ${compressedCommission[2]} ← ${t('level')} ${compressedCommission[1]}`
+  if (raw === 'Sales Adviser inactive/expired; commission compressed to active upline') return t('note_SkippedCompressed')
+  if (/^Forfeited commission from level /i.test(raw)) return `${t('note_ForfeitedCommission')} · ${t('level')} ${raw.split(' ').pop()}`
+  if (raw === 'Company net after paid and forfeited commissions' || raw === 'Company net after paid commissions') return t('note_CompanyNet')
+  if (raw === 'Product order paid by Reward') return t('note_ProductOrderPaidByReward')
+  if (raw === 'Withdrawal requested; amount held') return t('note_WithdrawalRequested')
+  if (raw === 'Withdrawal rejected; Reward refunded') return t('note_WithdrawalRejectedRefunded')
+  return raw
 }
 
 function Button({ children, variant = 'primary', ...props }) {
@@ -160,14 +192,18 @@ function CenterNotice({ open, title, message, type = 'info', onClose, children }
 
 
 function MobileTabs({ t, tabs, tab, setTab }) {
+  const pickTab = (x) => (event) => {
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    setTab(x)
+  }
   return (
     <>
       <div className="tabs desktop-tabs">
-        {tabs.map((x) => <button key={x} className={tab === x ? 'active' : ''} onClick={() => setTab(x)}>{t(normalizeTab(x))}</button>)}
+        {tabs.map((x) => <button type="button" key={x} className={tab === x ? 'active' : ''} onClick={pickTab(x)}>{t(normalizeTab(x))}</button>)}
       </div>
-      <div className="mobile-current-tab" aria-label={t(normalizeTab(tab))}>
-        <strong>{t(normalizeTab(tab))}</strong>
-        <span aria-hidden="true"></span>
+      <div className="mobile-inline-tabs" aria-label={t('menu')}>
+        {tabs.map((x) => <button type="button" key={x} className={tab === x ? 'active' : ''} onClick={pickTab(x)}>{t(normalizeTab(x))}</button>)}
       </div>
     </>
   )
@@ -589,7 +625,7 @@ function AdminHome({ t, data, isSuper }) {
       </div>
       {isSuper && <Card>
         <h3>{t('commissionHistory')}</h3>
-        <Table><tbody>{data.recentCommissions.length ? data.recentCommissions.map((r) => <tr key={r.id}><td>L{r.generation}</td><td>{r.sourceType}</td><td>{money(r.amount)}</td><td><StatusBadge t={t} status={r.status} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+        <Table><tbody>{data.recentCommissions.length ? data.recentCommissions.map((r) => <tr key={r.id}><td>L{r.generation}</td><td>{sourceTypeText(t, r.sourceType)}</td><td>{money(r.amount)}</td><td><StatusBadge t={t} status={r.status} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
       </Card>}
     </>
   )
@@ -744,7 +780,7 @@ function AdminProofs({ t, proofs, reload }) {
       <h3>{t('paymentProofs')}</h3>
       <Table>
         <thead><tr><th>{t('type')}</th><th>{t('submittedBy')}</th><th>{t('amount')}</th><th>{t('proof')}</th><th>{t('status')}</th><th>{t('createdAt')}</th><th>{t('action')}</th></tr></thead>
-        <tbody>{proofs.map((p) => <tr key={p.id}><td>{p.type}</td><td>{p.agent?.name || '-'}</td><td>{money(p.amount)}</td><td>{p.proofText}</td><td><StatusBadge t={t} status={p.status} /></td><td>{dateText(p.createdAt)}</td><td><ActionMenu t={t} actions={[{ label: t('approve'), onClick: () => approve(p.id), hidden: p.status !== 'PENDING' }, { label: t('reject'), variant: 'danger', onClick: () => reject(p.id), hidden: p.status !== 'PENDING' }]} /></td></tr>)}</tbody>
+        <tbody>{proofs.map((p) => <tr key={p.id}><td>{proofTypeText(t, p.type)}</td><td>{p.agent?.name || '-'}</td><td>{money(p.amount)}</td><td>{p.proofText}</td><td><StatusBadge t={t} status={p.status} /></td><td>{dateText(p.createdAt)}</td><td><ActionMenu t={t} actions={[{ label: t('approve'), onClick: () => approve(p.id), hidden: p.status !== 'PENDING' }, { label: t('reject'), variant: 'danger', onClick: () => reject(p.id), hidden: p.status !== 'PENDING' }]} /></td></tr>)}</tbody>
       </Table>
     </Card>
   )
@@ -835,8 +871,8 @@ function AdminRules({ t, rulesData, reload, isSuper = false }) {
 function AdminWallet({ t, wallet }) {
   return (
     <div className="two-col">
-      <Card><h3>{t('rewardLedger')}</h3><Table><tbody>{wallet.rows.slice(0, 80).map((w) => <tr key={w.id}><td>{w.agent?.agentCode}</td><td>{w.type}</td><td>{money(w.amount)}</td><td>{w.note}</td><td>{dateText(w.createdAt)}</td></tr>)}</tbody></Table></Card>
-      <Card><h3>{t('companyLedger')}</h3><Table><tbody>{wallet.companyLedger.slice(0, 80).map((w) => <tr key={w.id}><td>{w.sourceType}</td><td>{money(w.amount)}</td><td>{w.note}</td><td>{dateText(w.createdAt)}</td></tr>)}</tbody></Table></Card>
+      <Card><h3>{t('rewardLedger')}</h3><Table><tbody>{wallet.rows.slice(0, 80).map((w) => <tr key={w.id}><td>{w.agent?.agentCode}</td><td>{ledgerTypeText(t, w.type)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>)}</tbody></Table></Card>
+      <Card><h3>{t('companyLedger')}</h3><Table><tbody>{wallet.companyLedger.slice(0, 80).map((w) => <tr key={w.id}><td>{sourceTypeText(t, w.sourceType)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>)}</tbody></Table></Card>
     </div>
   )
 }
@@ -955,7 +991,8 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
           {tab === 'team' && <AgentTeam t={t} team={data.team} me={data.me.agent} />}
           {tab === 'products' && <AgentProducts t={t} products={data.products.products} reload={load} agent={data.me.agent} />}
           {tab === 'orders' && <AgentOrders t={t} orders={data.orders.orders} />}
-          {(tab === 'reward' || tab === 'withdrawals') && <AgentWallet t={t} wallet={data.wallet} me={data.me.agent} reload={load} />}
+          {tab === 'reward' && <AgentReward t={t} wallet={data.wallet} me={data.me.agent} />}
+          {tab === 'withdrawals' && <AgentWithdrawals t={t} wallet={data.wallet} me={data.me.agent} reload={load} />}
         </>
       )}
     </Layout>
@@ -995,7 +1032,7 @@ function AgentProfile({ t, me, reload }) {
   const [message, setMessage] = useState('')
   async function save() {
     await api('/api/agent/profile', { method: 'PATCH', body: form }, 'agent')
-    setMessage('Saved')
+    setMessage(t('saved'))
     reload()
   }
   return (
@@ -1041,7 +1078,7 @@ function AgentTeam({ t, team, me }) {
   return (
     <>
       <CenterNotice open={Boolean(notice)} title={notice?.title} message={notice?.message} type={notice?.type} onClose={() => setNotice(null)} />
-      <Card>
+      <Card className="qr-referral-card">
         <h3>{t('myReferralLink')}</h3>
         <p>{t('referralLinkHint')}</p>
         <div className="referral-box">
@@ -1051,7 +1088,10 @@ function AgentTeam({ t, team, me }) {
           </div>
           <div className="qr-panel">
             <div ref={qrRef} className="qr-img qr-local"><QRCodeCanvas value={referralLink} size={220} includeMargin /></div>
-            <Button variant="secondary" onClick={downloadQrCode}>{t('downloadQrCode')}</Button>
+            <div className="qr-actions">
+              <Button variant="secondary" onClick={downloadQrCode}>{t('downloadQrCode')}</Button>
+              <Button variant="secondary" onClick={copyLink}>{t('copyLink')}</Button>
+            </div>
           </div>
         </div>
       </Card>
@@ -1078,7 +1118,7 @@ function AgentProducts({ t, products, reload, agent }) {
       setNotice({ title: t('orderPaidSuccessTitle'), message: t('orderPaidSuccessMessage'), type: 'success' })
       reload()
     } catch (err) {
-      if (err.message === 'INSUFFICIENT_REWARD_CREDIT') {
+      if (err.message === 'INSUFFICIENT_REWARD_CREDIT' || err.message === 'INSUFFICIENT_REWARD') {
         const required = err.data?.required ?? totalAmount
         const balance = err.data?.balance ?? agent.balance
         setNotice({
@@ -1121,7 +1161,22 @@ function AgentOrders({ t, orders }) {
   return <Card><h3>{t('myOrders')}</h3><Table><thead><tr><th>{t('productName')}</th><th>{t('qty')}</th><th>{t('amount')}</th><th>{t('customerName')}</th><th>{t('customerPhone')}</th><th>{t('deliveryAddress')}</th><th>{t('paymentStatus')}</th><th>{t('fulfillmentStatus')}</th><th>{t('createdAt')}</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.product?.name}</td><td>{o.qty}</td><td>{money(o.totalAmount)}</td><td>{o.customerName}</td><td>{o.customerPhone}</td><td>{o.deliveryAddress || '-'}</td><td><StatusBadge t={t} status={o.status} /></td><td><StatusBadge t={t} status={o.fulfillmentStatus} /></td><td>{dateText(o.createdAt)}</td></tr>)}</tbody></Table></Card>
 }
 
-function AgentWallet({ t, wallet, me, reload }) {
+function AgentReward({ t, wallet, me }) {
+  return (
+    <>
+      <div className="stats-grid">
+        <StatCard label={t('rewardCredit')} value={money(wallet.balance)} hint={t('creditEqualRm')} />
+        <StatCard label={t('annualFeeReminder')} value={`${me.annualFeeDaysLeft} ${t('days')}`} />
+      </div>
+      <div className="two-col">
+        <Card><h3>{t('rewardLedger')}</h3><Table><tbody>{wallet.ledger.length ? wallet.ledger.map((w) => <tr key={w.id}><td>{ledgerTypeText(t, w.type)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
+        <Card><h3>{t('commissionHistory')}</h3><Table><tbody>{wallet.commissions.length ? wallet.commissions.map((c) => <tr key={c.id}><td>L{c.generation}</td><td>{sourceTypeText(t, c.sourceType)}</td><td>{money(c.amount)}</td><td><StatusBadge t={t} status={c.status} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
+      </div>
+    </>
+  )
+}
+
+function AgentWithdrawals({ t, wallet, me, reload }) {
   const [amount, setAmount] = useState('')
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
@@ -1136,17 +1191,16 @@ function AgentWallet({ t, wallet, me, reload }) {
   }
   return (
     <>
-      <div className="stats-grid"><StatCard label={t('rewardCredit')} value={money(wallet.balance)} hint={t('creditEqualRm')} /><StatCard label={t('annualFeeReminder')} value={`${me.annualFeeDaysLeft} ${t('days')}`} /></div>
+      <div className="stats-grid">
+        <StatCard label={t('rewardCredit')} value={money(wallet.balance)} hint={t('creditEqualRm')} />
+        <StatCard label={t('annualFeeReminder')} value={`${me.annualFeeDaysLeft} ${t('days')}`} />
+      </div>
       <Card>
         <h3>{t('requestWithdrawal')}</h3>
         <ErrorBox error={error} />{message && <div className="success-box">{message}</div>}
-        <div className="row gap align-end"><Field label={t('amount')}><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field><Button onClick={withdraw}>{t('requestWithdrawal')}</Button></div>
+        <div className="row gap align-end withdrawal-form"><Field label={t('amount')}><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field><Button onClick={withdraw}>{t('requestWithdrawal')}</Button></div>
       </Card>
-      <div className="two-col">
-        <Card><h3>{t('rewardLedger')}</h3><Table><tbody>{wallet.ledger.map((w) => <tr key={w.id}><td>{w.type}</td><td>{money(w.amount)}</td><td>{w.note}</td><td>{dateText(w.createdAt)}</td></tr>)}</tbody></Table></Card>
-        <Card><h3>{t('commissionHistory')}</h3><Table><tbody>{wallet.commissions.map((c) => <tr key={c.id}><td>L{c.generation}</td><td>{c.sourceType}</td><td>{money(c.amount)}</td><td><StatusBadge t={t} status={c.status} /></td></tr>)}</tbody></Table></Card>
-      </div>
-      <Card><h3>{t('withdrawals')}</h3><Table><tbody>{wallet.withdrawals.map((w) => <tr key={w.id}><td>{money(w.amount)}</td><td><StatusBadge t={t} status={w.status} /></td><td>{dateText(w.createdAt)}</td></tr>)}</tbody></Table></Card>
+      <Card><h3>{t('withdrawals')}</h3><Table><tbody>{wallet.withdrawals.length ? wallet.withdrawals.map((w) => <tr key={w.id}><td>{money(w.amount)}</td><td><StatusBadge t={t} status={w.status} /></td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
     </>
   )
 }

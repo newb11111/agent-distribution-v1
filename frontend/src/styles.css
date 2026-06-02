@@ -443,3 +443,83 @@ tr:last-child td { border-bottom: 0; }
   .agent-payment-qr,
   .payment-qr-admin-preview { justify-items: center; }
 }
+
+/* V2.4: clearer Sales Adviser mobile tabs + QR and withdrawal fixes */
+.mobile-inline-tabs { display: none; }
+.qr-actions { display: grid; gap: 8px; width: min(260px, 100%); }
+.qr-actions .btn { width: 100%; }
+.qr-referral-card { overflow: visible; }
+body { overflow-x: hidden; }
+
+@media (max-width: 760px) {
+  .mobile-current-tab { display: none !important; }
+  .mobile-inline-tabs {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 0 2px 10px;
+    margin-bottom: 10px;
+  }
+  .mobile-inline-tabs button {
+    flex: 0 0 auto;
+    border: 1px solid #dce8f4;
+    background: white;
+    color: #526577;
+    padding: 10px 13px;
+    border-radius: 999px;
+    cursor: pointer;
+    font-weight: 900;
+    white-space: nowrap;
+    box-shadow: 0 8px 22px rgba(16,32,51,.05);
+  }
+  .mobile-inline-tabs button.active {
+    background: #0a66c2;
+    color: white;
+    border-color: #0a66c2;
+  }
+  .withdrawal-form {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .withdrawal-form .btn { width: 100%; }
+}
+
+@media (max-width: 700px) {
+  .referral-box {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 14px;
+    align-items: start;
+  }
+  .qr-panel {
+    width: 100%;
+    max-width: 100%;
+    justify-items: center;
+    padding-top: 4px;
+  }
+  .qr-img {
+    width: 206px !important;
+    min-height: 206px !important;
+    max-width: 206px !important;
+    padding: 8px !important;
+    margin: 0 auto !important;
+    overflow: visible !important;
+  }
+  .qr-img canvas {
+    width: 180px !important;
+    height: 180px !important;
+  }
+}
+
+@media (max-width: 360px) {
+  .qr-img {
+    width: 186px !important;
+    min-height: 186px !important;
+    max-width: 186px !important;
+  }
+  .qr-img canvas {
+    width: 160px !important;
+    height: 160px !important;
+  }
+}

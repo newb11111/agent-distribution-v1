@@ -36,8 +36,9 @@ export function StatusBadge({ status, t }) {
     PENDING_PROOF: 'pending',
     PROOF_SUBMITTED: 'pending',
     PAID_BY_REWARD: 'paidByReward',
-    PAID_TO_AGENT: 'paid',
-    FORFEITED_TO_COMPANY: 'companyIncome',
+    PAID_TO_AGENT: 'paidToAgent',
+    FORFEITED_TO_COMPANY: 'forfeitedToCompany',
+    SKIPPED_INACTIVE_COMPRESSED: 'skippedInactiveCompressed',
     WAITING_PAYMENT_APPROVAL: 'waitingPaymentApproval',
     PENDING_PACK: 'pendingPack',
     PACKED_SHIPPED: 'packedShipped'

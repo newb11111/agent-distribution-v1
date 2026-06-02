@@ -1,4 +1,4 @@
-import { addDays, audit, daysLeft, query, roundMoney, tx, uid } from './db.js'
+import { addDays, audit, daysLeft, jsonValue, query, roundMoney, tx, uid } from './db.js'
 
 export async function getAgentBalance(agentId, client = null) {
   const q = client || { query }
@@ -13,19 +13,47 @@ export async function lockAgentBalance(client, agentId) {
   await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`agent-balance:${agentId}`])
 }
 
-export async function getUplineChain(client, agentId, maxLevels) {
+function isCommissionEligible(agent) {
+  return agent?.status === 'ACTIVE' && daysLeft(agent?.annual_fee_expires_at) > 0
+}
+
+export async function getUplineChain(client, agentId, maxLevels, { compressInactive = false } = {}) {
   const chain = []
+  const skipped = []
   let currentId = agentId
-  for (let level = 1; level <= maxLevels; level += 1) {
+  let naturalLevel = 0
+  let payoutLevel = 0
+  const visited = new Set([agentId])
+
+  while (payoutLevel < maxLevels) {
     const current = await client.query('SELECT sponsor_agent_id FROM sales_advisers WHERE id=$1', [currentId])
     const sponsorId = current.rows[0]?.sponsor_agent_id
-    if (!sponsorId) break
+    if (!sponsorId || visited.has(sponsorId)) break
+    visited.add(sponsorId)
+    naturalLevel += 1
+
     const sponsor = await client.query('SELECT * FROM sales_advisers WHERE id=$1', [sponsorId])
-    if (!sponsor.rows[0]) break
-    chain.push({ level, agent: sponsor.rows[0] })
+    const sponsorRow = sponsor.rows[0]
+    if (!sponsorRow) break
+
+    const eligible = isCommissionEligible(sponsorRow)
+    if (compressInactive && !eligible) {
+      skipped.push({ naturalLevel, agent: sponsorRow })
+      currentId = sponsorId
+      continue
+    }
+
+    payoutLevel += 1
+    chain.push({
+      level: compressInactive ? payoutLevel : naturalLevel,
+      naturalLevel,
+      agent: sponsorRow,
+      compressedFromLevel: compressInactive && naturalLevel !== payoutLevel ? naturalLevel : null
+    })
     currentId = sponsorId
   }
-  return chain
+
+  return { chain, skipped }
 }
 
 export function calculateCommission(baseAmount, rule) {
@@ -83,55 +111,93 @@ export async function getRules(client, kind, ownerAdminId = 'admin_super') {
 }
 
 export async function allocateCommission(client, { fromAgentId, baseAmount, sourceType, sourceId, maxLevels, kind, ownerAdminId = null }) {
+  const cleanSourceType = String(sourceType || '').trim()
+  const cleanSourceId = String(sourceId || '').trim()
+  if (!cleanSourceType || !cleanSourceId) throw new Error('FINANCIAL_SOURCE_REQUIRED')
+
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`financial-source:${cleanSourceType}:${cleanSourceId}`])
+  const existing = await client.query('SELECT summary FROM financial_transactions WHERE source_type=$1 AND source_id=$2 FOR UPDATE', [cleanSourceType, cleanSourceId])
+  if (existing.rowCount) {
+    return { ...jsonValue(existing.rows[0].summary, {}), idempotent: true }
+  }
+
+  const cleanBaseAmount = Math.max(0, roundMoney(Number(baseAmount || 0)))
   const ownerRes = ownerAdminId ? null : await client.query('SELECT owner_admin_id FROM sales_advisers WHERE id=$1', [fromAgentId])
   const ruleOwnerAdminId = ownerAdminId || ownerRes?.rows[0]?.owner_admin_id || 'admin_super'
   const rules = await getRules(client, kind, ruleOwnerAdminId)
-  const chain = await getUplineChain(client, fromAgentId, maxLevels)
+  const { chain, skipped } = await getUplineChain(client, fromAgentId, maxLevels, { compressInactive: true })
   let totalPaid = 0
-  let totalForfeited = 0
+  let totalSkipped = 0
   const rows = []
 
-  for (const item of chain) {
-    const rule = rules.find((r) => Number(r.generation) === Number(item.level))
-    const amount = calculateCommission(baseAmount, rule)
-    if (amount <= 0) continue
-
-    const isEligible = item.agent.status === 'ACTIVE' && daysLeft(item.agent.annual_fee_expires_at) > 0
+  for (const item of skipped) {
     const commissionId = uid('commission')
     await client.query(
       `INSERT INTO commission_ledger
        (id, owner_admin_id, source_type, source_id, from_agent_id, to_agent_id, generation, rule_type, rule_value, base_amount, amount, status, note)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
-        commissionId, ruleOwnerAdminId, sourceType, sourceId, fromAgentId, item.agent.id, item.level,
-        rule?.type || 'percent', Number(rule?.value || 0), roundMoney(baseAmount), amount,
-        isEligible ? 'PAID_TO_AGENT' : 'FORFEITED_TO_COMPANY',
-        isEligible ? 'Commission credited to reward' : 'Sales Adviser frozen/expired; commission belongs to company'
+        commissionId, ruleOwnerAdminId, cleanSourceType, cleanSourceId, fromAgentId, item.agent.id, item.naturalLevel,
+        'percent', 0, cleanBaseAmount, 0,
+        'SKIPPED_INACTIVE_COMPRESSED',
+        'Sales Adviser inactive/expired; commission compressed to active upline'
+      ]
+    )
+    rows.push(commissionId)
+    totalSkipped += 1
+  }
+
+  for (const item of chain) {
+    const remaining = roundMoney(cleanBaseAmount - totalPaid)
+    if (remaining <= 0) break
+    const rule = rules.find((r) => Number(r.generation) === Number(item.level))
+    const rawAmount = calculateCommission(cleanBaseAmount, rule)
+    const amount = Math.min(rawAmount, remaining)
+    if (amount <= 0) continue
+
+    const commissionId = uid('commission')
+    const note = item.compressedFromLevel
+      ? `Commission credited to reward; compressed from level ${item.compressedFromLevel} to level ${item.level}`
+      : 'Commission credited to reward'
+    await client.query(
+      `INSERT INTO commission_ledger
+       (id, owner_admin_id, source_type, source_id, from_agent_id, to_agent_id, generation, rule_type, rule_value, base_amount, amount, status, note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [
+        commissionId, ruleOwnerAdminId, cleanSourceType, cleanSourceId, fromAgentId, item.agent.id, item.level,
+        rule?.type || 'percent', Number(rule?.value || 0), cleanBaseAmount, amount,
+        'PAID_TO_AGENT',
+        note
       ]
     )
     rows.push(commissionId)
 
-    if (isEligible) {
-      await creditAgent(client, {
-        agentId: item.agent.id,
-        amount,
-        sourceType,
-        sourceId,
-        type: sourceType === 'PRODUCT_ORDER' ? 'PRODUCT_COMMISSION_IN' : 'ANNUAL_FEE_COMMISSION_IN',
-        note: `${sourceType} commission level ${item.level}`
-      })
-      totalPaid = roundMoney(totalPaid + amount)
-    } else {
-      await creditCompany(client, { amount, sourceType, sourceId, note: `Forfeited commission from level ${item.level}` })
-      totalForfeited = roundMoney(totalForfeited + amount)
-    }
+    await creditAgent(client, {
+      agentId: item.agent.id,
+      amount,
+      sourceType: cleanSourceType,
+      sourceId: cleanSourceId,
+      type: cleanSourceType === 'PRODUCT_ORDER' ? 'PRODUCT_COMMISSION_IN' : 'ANNUAL_FEE_COMMISSION_IN',
+      note: item.compressedFromLevel
+        ? `${cleanSourceType} commission level ${item.level} (compressed from level ${item.compressedFromLevel})`
+        : `${cleanSourceType} commission level ${item.level}`
+    })
+    totalPaid = roundMoney(totalPaid + amount)
   }
 
-  const companyNet = roundMoney(Number(baseAmount) - totalPaid - totalForfeited)
+  const totalForfeited = 0
+  const companyNet = Math.max(0, roundMoney(cleanBaseAmount - totalPaid))
   if (companyNet > 0) {
-    await creditCompany(client, { amount: companyNet, sourceType, sourceId, note: 'Company net after paid and forfeited commissions' })
+    await creditCompany(client, { amount: companyNet, sourceType: cleanSourceType, sourceId: cleanSourceId, note: 'Company net after paid commissions' })
   }
-  return { totalPaid, totalForfeited, companyNet, rows }
+  const summary = { totalPaid, totalForfeited, totalSkipped, companyNet, rows, compressionEnabled: true }
+  await client.query(
+    `INSERT INTO financial_transactions (id, source_type, source_id, base_amount, summary)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (source_type, source_id) DO NOTHING`,
+    [uid('txn'), cleanSourceType, cleanSourceId, cleanBaseAmount, JSON.stringify(summary)]
+  )
+  return summary
 }
 
 export async function activateAnnualFee(client, { agentId, amount, sourceId, isAutoRenewal = false, sourceType = null }) {
@@ -170,7 +236,7 @@ export async function placeRewardOrder({ agentId, productId, qty, customerName, 
     const totalAmount = roundMoney(Number(product.price || 0) * cleanQty)
     const balance = await getAgentBalance(agentId, client)
     if (balance < totalAmount) {
-      const err = new Error('INSUFFICIENT_REWARD')
+      const err = new Error('INSUFFICIENT_REWARD_CREDIT')
       err.details = { required: totalAmount, balance }
       throw err
     }

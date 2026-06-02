@@ -40,7 +40,11 @@ export default function Layout({ children, lang, setLang, t, title, subtitle, ri
                       key={item}
                       type="button"
                       className={activeTab === item ? 'active' : ''}
-                      onClick={() => selectNav(item)}
+                      onClick={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        selectNav(item)
+                      }}
                     >
                       {t(item === 'adminUsers' ? 'adminUsers' : item)}
                     </button>

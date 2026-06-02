@@ -51,7 +51,7 @@ import {
 
 const app = express()
 const PORT = Number(process.env.PORT || 5001)
-const FRONTEND_URLS = String(process.env.FRONTEND_URL || 'http://localhost:5173').split(',').map((x) => x.trim())
+const FRONTEND_URLS = String(process.env.FRONTEND_URL || 'http://localhost:5173').split(',').map((x) => x.trim()).filter(Boolean)
 
 app.use(cors({ origin: (origin, cb) => !origin || FRONTEND_URLS.includes(origin) ? cb(null, true) : cb(new Error('CORS_BLOCKED')), credentials: true }))
 app.use(express.json({ limit: '3mb' }))
@@ -492,12 +492,16 @@ app.post('/api/admin/payment-proofs/:id/approve', requireAdmin, requireOfficeAdm
 
 app.post('/api/admin/payment-proofs/:id/reject', requireAdmin, requireOfficeAdmin, requireAdminPermission('paymentProofs'), async (req, res, next) => {
   try {
-    const proof = await query('SELECT * FROM payment_proofs WHERE id=$1', [req.params.id])
-    if (!proof.rows[0]) return res.status(404).json({ error: 'PROOF_NOT_FOUND' })
-    if (!(await canAccessAgent(req.admin, proof.rows[0].agent_id))) return res.status(403).json({ error: 'NO_SCOPE' })
-    await query('UPDATE payment_proofs SET status=$2, reviewed_by_admin_id=$3, reviewed_at=NOW(), reject_reason=$4 WHERE id=$1 AND status=$5', [req.params.id, 'REJECTED', req.admin.id, cleanText(req.body.reason), 'PENDING'])
-    await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'REJECT_PAYMENT_PROOF', entityType: 'PAYMENT_PROOF', entityId: req.params.id })
-    res.json({ ok: true })
+    const result = await tx(async (client) => {
+      const proof = (await client.query('SELECT * FROM payment_proofs WHERE id=$1 FOR UPDATE', [req.params.id])).rows[0]
+      if (!proof) throw new Error('PROOF_NOT_FOUND')
+      if (!(await canAccessAgent(req.admin, proof.agent_id))) throw new Error('NO_SCOPE')
+      if (proof.status !== 'PENDING') return { alreadyReviewed: true }
+      await client.query('UPDATE payment_proofs SET status=$2, reviewed_by_admin_id=$3, reviewed_at=NOW(), reject_reason=$4 WHERE id=$1', [proof.id, 'REJECTED', req.admin.id, cleanText(req.body.reason)])
+      await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'REJECT_PAYMENT_PROOF', entityType: 'PAYMENT_PROOF', entityId: proof.id, client })
+      return { ok: true }
+    })
+    res.json(result)
   } catch (err) { next(err) }
 })
 
@@ -531,12 +535,16 @@ app.get('/api/admin/withdrawals', requireAdmin, requireOfficeAdmin, requireAdmin
 
 app.post('/api/admin/withdrawals/:id/mark-paid', requireAdmin, requireOfficeAdmin, requireAdminPermission('withdrawals'), async (req, res, next) => {
   try {
-    const w = await query('SELECT * FROM withdrawals WHERE id=$1', [req.params.id])
-    if (!w.rows[0]) return res.status(404).json({ error: 'WITHDRAWAL_NOT_FOUND' })
-    if (!(await canAccessAgent(req.admin, w.rows[0].agent_id))) return res.status(403).json({ error: 'NO_SCOPE' })
-    await query('UPDATE withdrawals SET status=$2, reviewed_by_admin_id=$3, paid_at=NOW() WHERE id=$1 AND status=$4', [req.params.id, 'PAID', req.admin.id, 'PENDING'])
-    await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'WITHDRAWAL_MARK_PAID', entityType: 'WITHDRAWAL', entityId: req.params.id })
-    res.json({ ok: true })
+    const result = await tx(async (client) => {
+      const w = (await client.query('SELECT * FROM withdrawals WHERE id=$1 FOR UPDATE', [req.params.id])).rows[0]
+      if (!w) throw new Error('WITHDRAWAL_NOT_FOUND')
+      if (!(await canAccessAgent(req.admin, w.agent_id))) throw new Error('NO_SCOPE')
+      if (w.status !== 'PENDING') return { alreadyReviewed: true }
+      await client.query('UPDATE withdrawals SET status=$2, reviewed_by_admin_id=$3, paid_at=NOW() WHERE id=$1', [w.id, 'PAID', req.admin.id])
+      await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'WITHDRAWAL_MARK_PAID', entityType: 'WITHDRAWAL', entityId: w.id, client })
+      return { ok: true }
+    })
+    res.json(result)
   } catch (err) { next(err) }
 })
 
@@ -547,6 +555,7 @@ app.post('/api/admin/withdrawals/:id/reject', requireAdmin, requireOfficeAdmin, 
       if (!w) throw new Error('WITHDRAWAL_NOT_FOUND')
       if (!(await canAccessAgent(req.admin, w.agent_id))) throw new Error('NO_SCOPE')
       if (w.status !== 'PENDING') return
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`agent-balance:${w.agent_id}`])
       await client.query('UPDATE withdrawals SET status=$2, reviewed_by_admin_id=$3, rejected_at=NOW(), reject_reason=$4 WHERE id=$1', [w.id, 'REJECTED', req.admin.id, cleanText(req.body.reason)])
       await client.query(
         `INSERT INTO reward_ledger (id, agent_id, type, amount, source_type, source_id, status, note, created_by_admin_id)
@@ -686,10 +695,21 @@ app.post('/api/agent/payment-proof/annual-fee', requireAgent, async (req, res, n
   try {
     const amount = roundMoney(await getSetting('annualFeeAmount', 365))
     const proofText = cleanText(req.body.proofText)
-    const id = uid('proof')
-    await query(`INSERT INTO payment_proofs (id, type, agent_id, amount, proof_text, status) VALUES ($1,'ANNUAL_FEE',$2,$3,$4,'PENDING')`, [id, req.agent.id, amount, proofText])
-    await audit({ actorType: 'SALES_ADVISER', actorId: req.agent.id, action: 'SUBMIT_ANNUAL_FEE_PROOF', entityType: 'PAYMENT_PROOF', entityId: id })
-    res.json({ ok: true, id, amount })
+    const result = await tx(async (client) => {
+      const agent = (await client.query('SELECT * FROM sales_advisers WHERE id=$1 FOR UPDATE', [req.agent.id])).rows[0]
+      if (!agent) throw new Error('AGENT_NOT_FOUND')
+      if (agent.status === 'ACTIVE' && daysLeft(agent.annual_fee_expires_at) > 0) throw new Error('ANNUAL_FEE_ALREADY_ACTIVE')
+      const pending = await client.query(
+        `SELECT id FROM payment_proofs WHERE agent_id=$1 AND type='ANNUAL_FEE' AND status='PENDING' LIMIT 1`,
+        [req.agent.id]
+      )
+      if (pending.rowCount) throw new Error('PENDING_ANNUAL_FEE_PROOF_EXISTS')
+      const id = uid('proof')
+      await client.query(`INSERT INTO payment_proofs (id, type, agent_id, amount, proof_text, status) VALUES ($1,'ANNUAL_FEE',$2,$3,$4,'PENDING')`, [id, req.agent.id, amount, proofText])
+      await audit({ actorType: 'SALES_ADVISER', actorId: req.agent.id, action: 'SUBMIT_ANNUAL_FEE_PROOF', entityType: 'PAYMENT_PROOF', entityId: id, client })
+      return { id, amount }
+    })
+    res.json({ ok: true, ...result })
   } catch (err) { next(err) }
 })
 
@@ -731,9 +751,14 @@ app.post('/api/agent/withdrawals', requireAgent, async (req, res, next) => {
       if (amount <= 0) throw new Error('INVALID_AMOUNT')
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`agent-balance:${req.agent.id}`])
       const balance = await getAgentBalance(req.agent.id, client)
-      if (balance < amount) throw new Error('INSUFFICIENT_REWARD')
-      const agent = (await client.query('SELECT profile FROM sales_advisers WHERE id=$1', [req.agent.id])).rows[0]
+      if (balance < amount) {
+        const err = new Error('INSUFFICIENT_REWARD')
+        err.details = { required: amount, balance }
+        throw err
+      }
+      const agent = (await client.query('SELECT profile FROM sales_advisers WHERE id=$1 FOR UPDATE', [req.agent.id])).rows[0]
       const bank = jsonValue(agent.profile, {})
+      if (!cleanText(bank.bankName) || !cleanText(bank.bankAccountName) || !cleanText(bank.bankAccountNo)) throw new Error('BANK_INFO_REQUIRED')
       const id = uid('withdrawal')
       await client.query('INSERT INTO withdrawals (id, agent_id, amount, bank_snapshot, status) VALUES ($1,$2,$3,$4,$5)', [id, req.agent.id, amount, JSON.stringify(bank), 'PENDING'])
       await client.query(`INSERT INTO reward_ledger (id, agent_id, type, amount, source_type, source_id, status, note) VALUES ($1,$2,'WITHDRAWAL_HOLD',$3,'WITHDRAWAL',$4,'POSTED','Withdrawal requested; amount held')`, [uid('reward'), req.agent.id, -amount, id])
@@ -756,7 +781,9 @@ app.use((err, req, res, next) => {
 async function start() {
   await initDatabase()
   if (process.env.ENABLE_ANNUAL_FEE_CRON !== 'false') {
-    const schedule = process.env.ANNUAL_FEE_CRON || '10 0 * * *'
+    const requestedSchedule = String(process.env.ANNUAL_FEE_CRON || '').trim() || '10 0 * * *'
+    const schedule = cron.validate(requestedSchedule) ? requestedSchedule : '10 0 * * *'
+    if (schedule !== requestedSchedule) console.warn(`Invalid ANNUAL_FEE_CRON "${requestedSchedule}". Using default ${schedule}.`)
     cron.schedule(schedule, async () => {
       try { await runAnnualRenewalCheckOnce('cron') } catch (err) { console.error('Annual renewal cron failed:', err) }
     })
