@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken'
-import { query, jsonValue } from './db.js'
+import { query, jsonValue, normalizeAdminPermissions } from './db.js'
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-before-production'
 const TOKEN_EXPIRES_IN = process.env.TOKEN_EXPIRES_IN || '12h'
@@ -86,7 +86,7 @@ export function toAdmin(row) {
     code: row.code,
     name: row.name,
     role: row.role,
-    permissions: jsonValue(row.permissions, []),
+    permissions: normalizeAdminPermissions(row.role, jsonValue(row.permissions, [])),
     status: row.status,
     scopeOwnerAdminId: row.scope_owner_admin_id,
     createdAt: row.created_at,

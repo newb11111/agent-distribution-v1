@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { QRCodeCanvas } from 'qrcode.react'
 import { createRoot } from 'react-dom/client'
 import Layout from './components/Layout'
@@ -133,6 +133,15 @@ function buildWhatsappUrl(phone, text) {
   return `https://wa.me/${digits}?text=${encodeURIComponent(text || '')}`
 }
 
+
+function buildAdminWhatsappMessage(template, { amount, agentCode, agentName }) {
+  const base = String(template || 'Hi Admin, I want to pay annual fee {amount}. Sales Adviser: {agentCode} ({agentName})')
+  return base
+    .replaceAll('{amount}', money(amount))
+    .replaceAll('{agentCode}', agentCode || '')
+    .replaceAll('{agentName}', agentName || '')
+}
+
 function CenterNotice({ open, title, message, type = 'info', onClose, children }) {
   if (!open) return null
   return (
@@ -195,12 +204,14 @@ function ActionMenu({ t, actions = [] }) {
 }
 
 
-const ADMIN_PERMISSION_KEYS = ['dashboard', 'agents', 'products', 'paymentProofs', 'withdrawals', 'orders', 'reports', 'reward', 'commissionRules']
-const DEFAULT_LEADER_PERMISSIONS = ['dashboard', 'agents', 'products', 'paymentProofs', 'withdrawals', 'orders', 'reports']
+const ADMIN_PERMISSION_KEYS = ['dashboard', 'agents', 'commissionRules']
+const DEFAULT_LEADER_PERMISSIONS = ['dashboard', 'agents', 'commissionRules']
 const REPORT_TYPES = ['orders', 'paymentProofs', 'commissions', 'rewardLedger', 'withdrawals', 'salesAdvisers', 'companyLedger']
 
 function hasAdminPermission(admin, key) {
   if (admin?.role === 'SUPER_ADMIN') return true
+  if (admin?.role === 'LEADER' && !ADMIN_PERMISSION_KEYS.includes(key)) return false
+  if (admin?.role === 'LEADER' && DEFAULT_LEADER_PERMISSIONS.includes(key)) return true
   return Array.isArray(admin?.permissions) && admin.permissions.includes(key)
 }
 
@@ -412,7 +423,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
           {tab === 'agents' && data.agents && <AdminAgents t={t} agents={data.agents.agents} ownerOptions={data.agents.ownerOptions || []} admin={admin} reload={load} />}
           {tab === 'products' && data.products && <AdminProducts t={t} products={data.products.products} reload={load} />}
           {tab === 'paymentProofs' && data.proofs && <AdminProofs t={t} proofs={data.proofs.proofs} reload={load} />}
-          {tab === 'commissionRules' && data.rules && <AdminRules t={t} rulesData={data.rules} reload={load} />}
+          {tab === 'commissionRules' && data.rules && <AdminRules t={t} rulesData={data.rules} reload={load} isSuper={isSuper} />}
           {tab === 'reward' && data.reward && <AdminWallet t={t} wallet={data.reward} />}
           {tab === 'withdrawals' && data.withdrawals && <AdminWithdrawals t={t} withdrawals={data.withdrawals.withdrawals} reload={load} />}
           {tab === 'orders' && data.orders && <AdminOrders t={t} orders={data.orders.orders} />}
@@ -739,12 +750,17 @@ function AdminProofs({ t, proofs, reload }) {
   )
 }
 
-function AdminRules({ t, rulesData, reload }) {
+function AdminRules({ t, rulesData, reload, isSuper = false }) {
+  const adminContact = rulesData.adminContact || {}
   const [product, setProduct] = useState(rulesData.rules.product)
   const [annualFee, setAnnualFee] = useState(rulesData.rules.annualFee)
   const [annualFeeAmount, setAnnualFeeAmount] = useState(rulesData.annualFeeAmount)
-  const [adminWhatsapp, setAdminWhatsapp] = useState(rulesData.adminWhatsapp || '')
+  const [adminWhatsapp, setAdminWhatsapp] = useState(adminContact.whatsapp || rulesData.adminWhatsapp || '')
+  const [whatsappText, setWhatsappText] = useState(adminContact.whatsappText || '')
+  const [paymentInstructions, setPaymentInstructions] = useState(adminContact.paymentInstructions || '')
+  const [paymentQrImage, setPaymentQrImage] = useState(adminContact.paymentQrImage || '')
   const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
 
   function updateRule(kind, idx, patch) {
     const setter = kind === 'product' ? setProduct : setAnnualFee
@@ -752,10 +768,29 @@ function AdminRules({ t, rulesData, reload }) {
     setter(list.map((r, i) => i === idx ? { ...r, ...patch } : r))
   }
 
+  function uploadQr(file) {
+    setError('')
+    if (!file) return
+    if (file.size > 1500 * 1024) {
+      setError(t('qrImageTooLarge'))
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => setPaymentQrImage(String(reader.result || ''))
+    reader.onerror = () => setError(t('qrImageUploadFailed'))
+    reader.readAsDataURL(file)
+  }
+
   async function save() {
-    await api('/api/admin/commission-rules', { method: 'PUT', body: { product, annualFee, annualFeeAmount, adminWhatsapp } }, 'admin')
-    setMessage('Saved')
-    reload()
+    setError(''); setMessage('')
+    try {
+      await api('/api/admin/commission-rules', {
+        method: 'PUT',
+        body: { product, annualFee, annualFeeAmount, adminWhatsapp, whatsappText, paymentInstructions, paymentQrImage }
+      }, 'admin')
+      setMessage(t('saved'))
+      reload()
+    } catch (err) { setError(t(err.message) || err.message) }
   }
 
   async function runRenewal() {
@@ -773,12 +808,22 @@ function AdminRules({ t, rulesData, reload }) {
 
   return (
     <Card>
-      <div className="section-head"><h3>{t('commissionRules')}</h3><div className="row gap"><Button variant="secondary" onClick={runRenewal}>{t('runRenewalCheck')}</Button><Button onClick={save}>{t('save')}</Button></div></div>
-      {message && <div className="success-box">{message}</div>}
+      <div className="section-head"><h3>{t('commissionRules')}</h3><div className="row gap">{isSuper && <Button variant="secondary" onClick={runRenewal}>{t('runRenewalCheck')}</Button>}<Button onClick={save}>{t('save')}</Button></div></div>
+      <ErrorBox error={error} />{message && <div className="success-box">{message}</div>}
+      <div className="notice">{t('adminContactSettingsHint')}</div>
       <div className="form-grid small">
         <Field label={t('annualFeeAmount')}><input type="number" value={annualFeeAmount} onChange={(e) => setAnnualFeeAmount(e.target.value)} /></Field>
-        <Field label={t('adminWhatsapp')}><input value={adminWhatsapp} onChange={(e) => setAdminWhatsapp(e.target.value)} /></Field>
+        <Field label={t('adminWhatsapp')}><input value={adminWhatsapp} onChange={(e) => setAdminWhatsapp(e.target.value)} placeholder="60123456789" /></Field>
+        <Field label={t('whatsappText')}><textarea value={whatsappText} onChange={(e) => setWhatsappText(e.target.value)} placeholder="Hi Admin, I want to pay annual fee {amount}. Sales Adviser: {agentCode}" /></Field>
+        <Field label={t('paymentInstructions')}><textarea value={paymentInstructions} onChange={(e) => setPaymentInstructions(e.target.value)} placeholder={t('paymentInstructionsPlaceholder')} /></Field>
+        <Field label={t('paymentQrImage')}>
+          <input value={paymentQrImage} onChange={(e) => setPaymentQrImage(e.target.value)} placeholder={t('qrImageUrlOrUpload')} />
+        </Field>
+        <Field label={t('uploadPaymentQr')}>
+          <input type="file" accept="image/*" onChange={(e) => uploadQr(e.target.files?.[0])} />
+        </Field>
       </div>
+      {paymentQrImage && <div className="payment-qr-admin-preview"><img src={paymentQrImage} alt={t('paymentQrImage')} /><Button variant="secondary" onClick={() => setPaymentQrImage('')}>{t('removeQrImage')}</Button></div>}
       <div className="two-col">
         {editor(t('productCommission'), 'product', product)}
         {editor(t('annualFeeCommission'), 'annualFee', annualFee)}
@@ -865,7 +910,7 @@ function AgentApp({ lang, setLang, t }) {
 }
 
 function AgentDashboard({ lang, setLang, t, onLogout }) {
-  const tabs = ['dashboard', 'profile', 'team', 'products', 'orders', 'reward']
+  const tabs = ['dashboard', 'profile', 'team', 'products', 'orders', 'reward', 'withdrawals']
   const [tab, setTab] = useState('dashboard')
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
@@ -910,7 +955,7 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
           {tab === 'team' && <AgentTeam t={t} team={data.team} me={data.me.agent} />}
           {tab === 'products' && <AgentProducts t={t} products={data.products.products} reload={load} agent={data.me.agent} />}
           {tab === 'orders' && <AgentOrders t={t} orders={data.orders.orders} />}
-          {tab === 'reward' && <AgentWallet t={t} wallet={data.wallet} me={data.me.agent} reload={load} />}
+          {(tab === 'reward' || tab === 'withdrawals') && <AgentWallet t={t} wallet={data.wallet} me={data.me.agent} reload={load} />}
         </>
       )}
     </Layout>
@@ -919,9 +964,10 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
 
 function AgentHome({ t, data, reload }) {
   const agent = data.me.agent
-  const adminWhatsapp = data.me.adminWhatsapp
+  const adminContact = data.me.adminContact || { whatsapp: data.me.adminWhatsapp }
   const annualFeeAmount = data.me.annualFeeAmount
-  const whatsappUrl = buildWhatsappUrl(adminWhatsapp, `Hi Admin, I want to pay annual fee ${annualFeeAmount}. Sales Adviser: ${agent.agentCode}`)
+  const whatsappMessage = buildAdminWhatsappMessage(adminContact.whatsappText, { amount: annualFeeAmount, agentCode: agent.agentCode, agentName: agent.name })
+  const whatsappUrl = buildWhatsappUrl(adminContact.whatsapp, whatsappMessage)
   return (
     <>
       {agent.status !== 'ACTIVE' && <div className="warning-box">{t('frozenWarning')}</div>}
@@ -935,6 +981,8 @@ function AgentHome({ t, data, reload }) {
         <h3>{t('annualFee')}</h3>
         <p>{t('manualBankTransfer')}</p>
         <p>{t('annualFeeAmount')}: <strong>{money(annualFeeAmount)}</strong></p>
+        {adminContact.paymentInstructions && <div className="notice contact-instructions">{adminContact.paymentInstructions}</div>}
+        {adminContact.paymentQrImage && <div className="agent-payment-qr"><img src={adminContact.paymentQrImage} alt={t('paymentQrImage')} /></div>}
         {whatsappUrl ? <a className="btn primary" href={whatsappUrl} target="_blank" rel="noreferrer">{t('contactAdminWhatsapp')}</a> : <span className="muted">{t('adminWhatsapp')}: -</span>}
       </Card>
     </>
@@ -969,10 +1017,24 @@ function AgentProfile({ t, me, reload }) {
 function AgentTeam({ t, team, me }) {
   const referralLink = buildRegisterLink(me.referralCode || me.agentCode)
   const [notice, setNotice] = useState(null)
+  const qrRef = useRef(null)
 
   async function copyLink() {
     await navigator.clipboard.writeText(referralLink)
     setNotice({ title: t('copied'), message: t('linkCopied'), type: 'success' })
+  }
+
+  function downloadQrCode() {
+    const canvas = qrRef.current?.querySelector('canvas')
+    if (!canvas) {
+      setNotice({ title: t('downloadQrCode'), message: t('qrDownloadFailed'), type: 'danger' })
+      return
+    }
+    const link = document.createElement('a')
+    link.download = `${me.agentCode || 'sales-adviser'}-qr.png`
+    link.href = canvas.toDataURL('image/png')
+    link.click()
+    setNotice({ title: t('downloadQrCode'), message: t('qrDownloaded'), type: 'success' })
   }
 
   const list = (title, rows) => <Card><h3>{title}</h3><Table><tbody>{rows.length ? rows.map((a) => <tr key={a.id}><td>{a.agentCode}</td><td>{a.name}</td><td>{a.email}</td><td><StatusBadge t={t} status={a.status} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
@@ -987,7 +1049,10 @@ function AgentTeam({ t, team, me }) {
             <div className="copy-link">{referralLink}</div>
             <div className="row gap"><Button onClick={copyLink}>{t('copyLink')}</Button><a className="btn secondary" href={referralLink}>{t('openLink')}</a></div>
           </div>
-          <div className="qr-img qr-local"><QRCodeCanvas value={referralLink} size={220} includeMargin /></div>
+          <div className="qr-panel">
+            <div ref={qrRef} className="qr-img qr-local"><QRCodeCanvas value={referralLink} size={220} includeMargin /></div>
+            <Button variant="secondary" onClick={downloadQrCode}>{t('downloadQrCode')}</Button>
+          </div>
         </div>
       </Card>
       <div className="two-col">

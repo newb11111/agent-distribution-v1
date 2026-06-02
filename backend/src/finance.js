@@ -67,13 +67,25 @@ async function creditCompany(client, { amount, sourceType, sourceId, note }) {
   return id
 }
 
-export async function getRules(client, kind) {
-  const res = await client.query('SELECT generation, type, value FROM commission_rules WHERE kind=$1 ORDER BY generation ASC', [kind])
+export async function getRules(client, kind, ownerAdminId = 'admin_super') {
+  const owner = ownerAdminId || 'admin_super'
+  const res = await client.query(
+    `SELECT DISTINCT ON (generation) generation, type, value
+     FROM (
+       SELECT generation, type, value, 1 AS priority FROM commission_rules WHERE kind=$1 AND owner_admin_id=$2
+       UNION ALL
+       SELECT generation, type, value, 2 AS priority FROM commission_rules WHERE kind=$1 AND owner_admin_id='admin_super'
+     ) x
+     ORDER BY generation ASC, priority ASC`,
+    [kind, owner]
+  )
   return res.rows.map((r) => ({ generation: Number(r.generation), type: r.type, value: Number(r.value || 0) }))
 }
 
-export async function allocateCommission(client, { fromAgentId, baseAmount, sourceType, sourceId, maxLevels, kind }) {
-  const rules = await getRules(client, kind)
+export async function allocateCommission(client, { fromAgentId, baseAmount, sourceType, sourceId, maxLevels, kind, ownerAdminId = null }) {
+  const ownerRes = ownerAdminId ? null : await client.query('SELECT owner_admin_id FROM sales_advisers WHERE id=$1', [fromAgentId])
+  const ruleOwnerAdminId = ownerAdminId || ownerRes?.rows[0]?.owner_admin_id || 'admin_super'
+  const rules = await getRules(client, kind, ruleOwnerAdminId)
   const chain = await getUplineChain(client, fromAgentId, maxLevels)
   let totalPaid = 0
   let totalForfeited = 0
@@ -88,10 +100,10 @@ export async function allocateCommission(client, { fromAgentId, baseAmount, sour
     const commissionId = uid('commission')
     await client.query(
       `INSERT INTO commission_ledger
-       (id, source_type, source_id, from_agent_id, to_agent_id, generation, rule_type, rule_value, base_amount, amount, status, note)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+       (id, owner_admin_id, source_type, source_id, from_agent_id, to_agent_id, generation, rule_type, rule_value, base_amount, amount, status, note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
-        commissionId, sourceType, sourceId, fromAgentId, item.agent.id, item.level,
+        commissionId, ruleOwnerAdminId, sourceType, sourceId, fromAgentId, item.agent.id, item.level,
         rule?.type || 'percent', Number(rule?.value || 0), roundMoney(baseAmount), amount,
         isEligible ? 'PAID_TO_AGENT' : 'FORFEITED_TO_COMPANY',
         isEligible ? 'Commission credited to reward' : 'Sales Adviser frozen/expired; commission belongs to company'
@@ -122,7 +134,7 @@ export async function allocateCommission(client, { fromAgentId, baseAmount, sour
   return { totalPaid, totalForfeited, companyNet, rows }
 }
 
-export async function activateAnnualFee(client, { agentId, amount, sourceId, isAutoRenewal = false }) {
+export async function activateAnnualFee(client, { agentId, amount, sourceId, isAutoRenewal = false, sourceType = null }) {
   const agentRes = await client.query('SELECT * FROM sales_advisers WHERE id=$1 FOR UPDATE', [agentId])
   const agent = agentRes.rows[0]
   if (!agent) throw new Error('AGENT_NOT_FOUND')
@@ -135,7 +147,7 @@ export async function activateAnnualFee(client, { agentId, amount, sourceId, isA
   const result = await allocateCommission(client, {
     fromAgentId: agentId,
     baseAmount: amount,
-    sourceType: isAutoRenewal ? 'ANNUAL_FEE_AUTO_RENEWAL' : 'ANNUAL_FEE_PAYMENT',
+    sourceType: sourceType || (isAutoRenewal ? 'ANNUAL_FEE_AUTO_RENEWAL' : 'ANNUAL_FEE_PAYMENT'),
     sourceId,
     maxLevels: 5,
     kind: 'annualFee'

@@ -94,12 +94,14 @@ tr:last-child td { border-bottom: 0; }
   table { min-width: 760px; }
 }
 
-.referral-box { display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center; }
+.referral-box { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; }
 .copy-link { padding: 12px 14px; border: 1px solid #dce8f4; background: #f7fbff; border-radius: 14px; font-weight: 800; color: #0a66c2; word-break: break-all; margin-bottom: 12px; }
-.qr-img { width: 180px; height: 180px; border-radius: 18px; border: 1px solid #dce8f4; background: white; padding: 10px; }
+.qr-panel { display: grid; gap: 10px; justify-items: center; align-content: start; }
+.qr-img { width: 244px; max-width: 100%; min-height: 244px; border-radius: 18px; border: 1px solid #dce8f4; background: white; padding: 10px; display: flex; align-items: center; justify-content: center; overflow: visible; }
+.qr-img canvas { width: 220px !important; height: 220px !important; max-width: 100%; }
 .badge.pending-pack, .badge.waiting-payment-approval { background: #fff9df; color: #8a6900; }
 .badge.packed-shipped { background: #e8fff2; color: #087a3f; }
-@media (max-width: 700px) { .referral-box { grid-template-columns: 1fr; } .qr-img { width: 160px; height: 160px; } }
+@media (max-width: 700px) { .referral-box { grid-template-columns: 1fr; } .qr-panel { width: 100%; } .qr-img { width: min(100%, 260px); min-height: 244px; margin: 0 auto; } }
 .permission-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 12px 0 16px; }
 .permission-pill { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border: 1px solid #dce8f4; border-radius: 999px; background: #f7fbff; color: #526577; font-size: 13px; font-weight: 800; }
 .permission-pill input { width: auto; box-shadow: none; }
@@ -410,4 +412,34 @@ tr:last-child td { border-bottom: 0; }
   .tac-send-wrap .btn {
     flex: 1;
   }
+}
+
+
+/* V2.3: per-admin WhatsApp/payment settings + mobile QR download */
+.contact-instructions {
+  white-space: pre-line;
+  font-weight: 700;
+}
+.agent-payment-qr,
+.payment-qr-admin-preview {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  margin: 12px 0;
+}
+.agent-payment-qr img,
+.payment-qr-admin-preview img {
+  width: min(260px, 100%);
+  max-height: 360px;
+  object-fit: contain;
+  background: white;
+  border: 1px solid #dce8f4;
+  border-radius: 18px;
+  padding: 10px;
+}
+@media (max-width: 700px) {
+  .referral-box > div:first-child { min-width: 0; }
+  .qr-panel .btn { width: min(260px, 100%); }
+  .agent-payment-qr,
+  .payment-qr-admin-preview { justify-items: center; }
 }
