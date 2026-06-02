@@ -546,15 +546,3 @@ body { overflow-x: hidden; }
     max-width: 210px;
   }
 }
-
-/* V1.5.7 performance stage 3: backend search + pagination */
-.list-search { display: flex; gap: 8px; align-items: center; min-width: min(100%, 360px); }
-.list-search input { min-width: 220px; }
-.pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #edf2f7; color: #526577; font-weight: 800; flex-wrap: wrap; }
-.pagination .btn[disabled] { opacity: .45; cursor: not-allowed; transform: none; box-shadow: none; }
-@media (max-width: 760px) {
-  .list-search { width: 100%; display: grid; grid-template-columns: 1fr auto; }
-  .list-search input { min-width: 0; }
-  .pagination { align-items: stretch; }
-  .pagination .row { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
-}
