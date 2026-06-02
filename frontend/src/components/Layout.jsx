@@ -11,9 +11,9 @@ export default function Layout({ children, lang, setLang, t, title, subtitle, ri
     <div className="app-shell">
       <header className="topbar">
         <div className="topbar-title">
-          <div className="brand">{t('appName')}</div>
-          {title && <h1>{title}</h1>}
-          {subtitle && <p>{subtitle}</p>}
+          <a className="brand-logo" href="/" aria-label="Nusantara">
+            <img src="/nusantaralogo.png" alt="Nusantara" />
+          </a>
         </div>
         <div className="top-actions">
           {right}
