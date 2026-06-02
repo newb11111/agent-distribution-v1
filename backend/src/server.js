@@ -157,6 +157,96 @@ function emptyPage(page, limit) {
   return paginationMeta(0, page, limit)
 }
 
+
+function safeCountRow(result, key = 'n') {
+  return Number(result?.rows?.[0]?.[key] || 0)
+}
+
+function backgroundTask(name, fn) {
+  setTimeout(() => {
+    Promise.resolve()
+      .then(fn)
+      .catch((err) => console.warn(`[background:${name}]`, err?.message || err))
+  }, 0)
+}
+
+async function warmAdminAfterDashboard(admin) {
+  if (process.env.ENABLE_ADMIN_DASHBOARD_WARMUP === 'false') return
+  const jobs = []
+
+  if (adminHasPermission(admin, 'agents')) {
+    jobs.push((async () => {
+      const scoped = scopedAgentsWhere(admin, 'a')
+      await query(
+        `SELECT a.id
+         FROM sales_advisers a
+         WHERE ${scoped.sql}
+         ORDER BY a.created_at DESC
+         LIMIT 50`,
+        scoped.params
+      )
+    })())
+  }
+
+  if (adminHasPermission(admin, 'orders')) {
+    jobs.push((async () => {
+      const scoped = scopedAgentsWhere(admin, 'a')
+      await query(
+        `SELECT o.id
+         FROM orders o
+         JOIN sales_advisers a ON a.id=o.agent_id
+         WHERE ${scoped.sql}
+         ORDER BY o.created_at DESC
+         LIMIT 50`,
+        scoped.params
+      )
+    })())
+  }
+
+  if (adminHasPermission(admin, 'reward')) {
+    jobs.push((async () => {
+      const scoped = scopedAgentsWhere(admin, 'a')
+      await query(
+        `SELECT w.id
+         FROM reward_ledger w
+         JOIN sales_advisers a ON a.id=w.agent_id
+         WHERE ${scoped.sql}
+         ORDER BY w.created_at DESC
+         LIMIT 50`,
+        scoped.params
+      )
+    })())
+  }
+
+  if (adminHasPermission(admin, 'withdrawals')) {
+    jobs.push((async () => {
+      const scoped = scopedAgentsWhere(admin, 'a')
+      await query(
+        `SELECT w.id
+         FROM withdrawals w
+         JOIN sales_advisers a ON a.id=w.agent_id
+         WHERE ${scoped.sql}
+         ORDER BY w.created_at DESC
+         LIMIT 50`,
+        scoped.params
+      )
+    })())
+  }
+
+  if (adminHasPermission(admin, 'reports')) {
+    jobs.push((async () => {
+      const scoped = scopedAgentsWhere(admin, 'a')
+      await Promise.all([
+        query(`SELECT COUNT(*)::int AS total FROM sales_advisers a WHERE ${scoped.sql}`, scoped.params),
+        query(`SELECT COUNT(*)::int AS total FROM orders o JOIN sales_advisers a ON a.id=o.agent_id WHERE ${scoped.sql}`, scoped.params),
+        query(`SELECT COUNT(*)::int AS total FROM withdrawals w JOIN sales_advisers a ON a.id=w.agent_id WHERE ${scoped.sql}`, scoped.params)
+      ])
+    })())
+  }
+
+  await Promise.allSettled(jobs)
+}
+
 async function canAccessAgent(admin, agentId) {
   if (admin.role === 'SUPER_ADMIN') return true
   const scope = adminDataScopeId(admin)
@@ -338,18 +428,54 @@ app.get('/api/config', async (req, res, next) => {
 
 app.get('/api/admin/dashboard', requireAdmin, requireOfficeAdmin, requireAdminPermission('dashboard'), async (req, res, next) => {
   try {
-    const ids = await scopedAgentIds(req.admin)
-    const inClause = makeInClause(ids)
-    const totalAgents = ids.length
-    const active = ids.length ? await query(`SELECT COUNT(*)::int AS n FROM sales_advisers WHERE id IN ${inClause.sql} AND status='ACTIVE'`, inClause.params) : { rows: [{ n: 0 }] }
-    const frozen = ids.length ? await query(`SELECT COUNT(*)::int AS n FROM sales_advisers WHERE id IN ${inClause.sql} AND status='FROZEN'`, inClause.params) : { rows: [{ n: 0 }] }
-    const proofs = ids.length ? await query(`SELECT COUNT(*)::int AS n FROM payment_proofs WHERE agent_id IN ${inClause.sql} AND status='PENDING'`, inClause.params) : { rows: [{ n: 0 }] }
-    const withdrawals = ids.length ? await query(`SELECT COUNT(*)::int AS n FROM withdrawals WHERE agent_id IN ${inClause.sql} AND status='PENDING'`, inClause.params) : { rows: [{ n: 0 }] }
-    const company = req.admin.role === 'SUPER_ADMIN' ? await query("SELECT COALESCE(SUM(amount),0)::numeric AS total FROM company_ledger") : { rows: [{ total: 0 }] }
-    const recent = req.admin.role === 'SUPER_ADMIN'
-      ? await query('SELECT * FROM commission_ledger ORDER BY created_at DESC LIMIT 20')
-      : { rows: [] }
-    res.json({ stats: { totalAgents, activeAgents: Number(active.rows[0].n), frozenAgents: Number(frozen.rows[0].n), pendingProofs: Number(proofs.rows[0].n), pendingWithdrawals: Number(withdrawals.rows[0].n), totalCompanyIncome: Number(company.rows[0].total || 0) }, recentCommissions: recent.rows.map((r) => ({ id: r.id, generation: r.generation, sourceType: r.source_type, amount: Number(r.amount), status: r.status })) })
+    const scoped = scopedAgentsWhere(req.admin, 'a')
+    const [agentStats, proofs, withdrawals, company, recent] = await Promise.all([
+      query(
+        `SELECT
+           COUNT(*)::int AS total_agents,
+           COUNT(*) FILTER (WHERE a.status='ACTIVE')::int AS active_agents,
+           COUNT(*) FILTER (WHERE a.status='FROZEN')::int AS frozen_agents
+         FROM sales_advisers a
+         WHERE ${scoped.sql}`,
+        scoped.params
+      ),
+      query(
+        `SELECT COUNT(*)::int AS n
+         FROM payment_proofs p
+         JOIN sales_advisers a ON a.id=p.agent_id
+         WHERE ${scoped.sql} AND p.status='PENDING'`,
+        scoped.params
+      ),
+      query(
+        `SELECT COUNT(*)::int AS n
+         FROM withdrawals w
+         JOIN sales_advisers a ON a.id=w.agent_id
+         WHERE ${scoped.sql} AND w.status='PENDING'`,
+        scoped.params
+      ),
+      req.admin.role === 'SUPER_ADMIN'
+        ? query("SELECT COALESCE(SUM(amount),0)::numeric AS total FROM company_ledger")
+        : Promise.resolve({ rows: [{ total: 0 }] }),
+      req.admin.role === 'SUPER_ADMIN'
+        ? query('SELECT * FROM commission_ledger ORDER BY created_at DESC LIMIT 20')
+        : Promise.resolve({ rows: [] })
+    ])
+
+    const statsRow = agentStats.rows[0] || {}
+    const payload = {
+      stats: {
+        totalAgents: Number(statsRow.total_agents || 0),
+        activeAgents: Number(statsRow.active_agents || 0),
+        frozenAgents: Number(statsRow.frozen_agents || 0),
+        pendingProofs: safeCountRow(proofs),
+        pendingWithdrawals: safeCountRow(withdrawals),
+        totalCompanyIncome: Number(company.rows[0]?.total || 0)
+      },
+      recentCommissions: recent.rows.map((r) => ({ id: r.id, generation: r.generation, sourceType: r.source_type, amount: Number(r.amount), status: r.status }))
+    }
+
+    res.json(payload)
+    backgroundTask('admin-dashboard-warmup', () => warmAdminAfterDashboard(req.admin))
   } catch (err) { next(err) }
 })
 
@@ -564,10 +690,8 @@ app.put('/api/admin/commission-rules', requireAdmin, requireOfficeAdmin, require
 app.get('/api/admin/payment-proofs', requireAdmin, requireOfficeAdmin, requireAdminPermission('paymentProofs'), async (req, res, next) => {
   try {
     const { page, limit, offset, search } = pageParams(req, 50, 100)
-    const ids = await scopedAgentIds(req.admin)
-    if (!ids.length) return res.json({ proofs: [], pagination: emptyPage(page, limit) })
-    const inClause = makeInClause(ids)
-    const params = [...inClause.params]
+    const scoped = scopedAgentsWhere(req.admin, 'a')
+    const params = [...scoped.params]
     let searchSql = ''
     if (search) {
       params.push(`%${search}%`)
@@ -579,7 +703,7 @@ app.get('/api/admin/payment-proofs', requireAdmin, requireOfficeAdmin, requireAd
       `SELECT p.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
        FROM payment_proofs p
        JOIN sales_advisers a ON a.id=p.agent_id
-       WHERE p.agent_id IN ${inClause.sql} ${searchSql}
+       WHERE ${scoped.sql} ${searchSql}
        ORDER BY p.created_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
@@ -623,10 +747,8 @@ app.post('/api/admin/payment-proofs/:id/reject', requireAdmin, requireOfficeAdmi
 app.get('/api/admin/orders', requireAdmin, requireOfficeAdmin, requireAdminPermission('orders'), async (req, res, next) => {
   try {
     const { page, limit, offset, search } = pageParams(req, 50, 100)
-    const ids = await scopedAgentIds(req.admin)
-    if (!ids.length) return res.json({ orders: [], pagination: emptyPage(page, limit) })
-    const inClause = makeInClause(ids)
-    const params = [...inClause.params]
+    const scoped = scopedAgentsWhere(req.admin, 'a')
+    const params = [...scoped.params]
     let searchSql = ''
     if (search) {
       params.push(`%${search}%`)
@@ -639,7 +761,7 @@ app.get('/api/admin/orders', requireAdmin, requireOfficeAdmin, requireAdminPermi
        FROM orders o
        JOIN sales_advisers a ON a.id=o.agent_id
        JOIN products p ON p.id=o.product_id
-       WHERE o.agent_id IN ${inClause.sql} ${searchSql}
+       WHERE ${scoped.sql} ${searchSql}
        ORDER BY o.created_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
@@ -651,43 +773,39 @@ app.get('/api/admin/orders', requireAdmin, requireOfficeAdmin, requireAdminPermi
 app.get('/api/admin/wallet-ledger', requireAdmin, requireOfficeAdmin, requireAdminPermission('reward'), async (req, res, next) => {
   try {
     const { page, limit, offset, search } = pageParams(req, 50, 100)
-    const ids = await scopedAgentIds(req.admin)
-    let rows = []
-    let total = 0
-    if (ids.length) {
-      const inClause = makeInClause(ids)
-      const params = [...inClause.params]
-      let searchSql = ''
-      if (search) {
-        params.push(`%${search}%`)
-        const i = params.length
-        searchSql = `AND (LOWER(w.type) LIKE $${i} OR LOWER(w.source_type) LIKE $${i} OR LOWER(COALESCE(w.note,'')) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.agent_code) LIKE $${i})`
-      }
-      params.push(limit, offset)
-      const reward = await query(
+    const scoped = scopedAgentsWhere(req.admin, 'a')
+    const params = [...scoped.params]
+    let searchSql = ''
+    if (search) {
+      params.push(`%${search}%`)
+      const i = params.length
+      searchSql = `AND (LOWER(w.type) LIKE $${i} OR LOWER(w.source_type) LIKE $${i} OR LOWER(COALESCE(w.note,'')) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.agent_code) LIKE $${i})`
+    }
+    params.push(limit, offset)
+    const [reward, company] = await Promise.all([
+      query(
         `SELECT w.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
          FROM reward_ledger w
          JOIN sales_advisers a ON a.id=w.agent_id
-         WHERE w.agent_id IN ${inClause.sql} ${searchSql}
+         WHERE ${scoped.sql} ${searchSql}
          ORDER BY w.created_at DESC
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
         params
-      )
-      rows = reward.rows.map((w) => ({ ...rowToLedger(w), agent: { name: w.agent_name, agentCode: w.agent_code } }))
-      total = reward.rows[0]?.total_count || 0
-    }
-    const companyLedger = req.admin.role === 'SUPER_ADMIN' ? (await query('SELECT * FROM company_ledger ORDER BY created_at DESC LIMIT 100')).rows.map(rowToCompany) : []
-    res.json({ rows, companyLedger, pagination: paginationMeta(total, page, limit) })
+      ),
+      req.admin.role === 'SUPER_ADMIN'
+        ? query('SELECT * FROM company_ledger ORDER BY created_at DESC LIMIT 100')
+        : Promise.resolve({ rows: [] })
+    ])
+    const rows = reward.rows.map((w) => ({ ...rowToLedger(w), agent: { name: w.agent_name, agentCode: w.agent_code } }))
+    res.json({ rows, companyLedger: company.rows.map(rowToCompany), pagination: paginationMeta(reward.rows[0]?.total_count || 0, page, limit) })
   } catch (err) { next(err) }
 })
 
 app.get('/api/admin/withdrawals', requireAdmin, requireOfficeAdmin, requireAdminPermission('withdrawals'), async (req, res, next) => {
   try {
     const { page, limit, offset, search } = pageParams(req, 50, 100)
-    const ids = await scopedAgentIds(req.admin)
-    if (!ids.length) return res.json({ withdrawals: [], pagination: emptyPage(page, limit) })
-    const inClause = makeInClause(ids)
-    const params = [...inClause.params]
+    const scoped = scopedAgentsWhere(req.admin, 'a')
+    const params = [...scoped.params]
     let searchSql = ''
     if (search) {
       params.push(`%${search}%`)
@@ -699,7 +817,7 @@ app.get('/api/admin/withdrawals', requireAdmin, requireOfficeAdmin, requireAdmin
       `SELECT w.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
        FROM withdrawals w
        JOIN sales_advisers a ON a.id=w.agent_id
-       WHERE w.agent_id IN ${inClause.sql} ${searchSql}
+       WHERE ${scoped.sql} ${searchSql}
        ORDER BY w.created_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
@@ -787,26 +905,52 @@ async function reportData(type, admin) {
 
 app.get('/api/admin/reports/summary', requireAdmin, requireOfficeAdmin, requireAdminPermission('reports'), async (req, res, next) => {
   try {
-    const ids = await scopedAgentIds(req.admin)
-    const inClause = makeInClause(ids)
+    const scoped = scopedAgentsWhere(req.admin, 'a')
     const types = ['orders', 'commissions', 'rewardLedger', 'withdrawals', 'salesAdvisers', ...(req.admin.role === 'SUPER_ADMIN' ? ['companyLedger'] : [])]
-    const stats = { totalSales: 0, totalOrders: 0, approvedOrders: 0, totalCommission: 0, totalWithdrawalsPaid: 0, totalCompanyIncome: 0, totalSalesAdvisers: ids.length, activeSalesAdvisers: 0 }
-    if (ids.length) {
-      const agentStats = await query(`SELECT COUNT(*)::int total, COUNT(*) FILTER (WHERE status='ACTIVE')::int active FROM sales_advisers WHERE id IN ${inClause.sql}`, inClause.params)
-      stats.totalSalesAdvisers = Number(agentStats.rows[0]?.total || 0)
-      stats.activeSalesAdvisers = Number(agentStats.rows[0]?.active || 0)
-      const orderStats = await query(`SELECT COUNT(*)::int total_orders, COUNT(*) FILTER (WHERE status IN ('APPROVED','PAID_BY_REWARD'))::int approved_orders, COALESCE(SUM(total_amount) FILTER (WHERE status IN ('APPROVED','PAID_BY_REWARD')),0)::numeric total_sales FROM orders WHERE agent_id IN ${inClause.sql}`, inClause.params)
-      stats.totalOrders = Number(orderStats.rows[0]?.total_orders || 0)
-      stats.approvedOrders = Number(orderStats.rows[0]?.approved_orders || 0)
-      stats.totalSales = Number(orderStats.rows[0]?.total_sales || 0)
-      const comm = await query(`SELECT COALESCE(SUM(amount),0)::numeric total FROM commission_ledger WHERE status='PAID_TO_AGENT' AND to_agent_id IN ${inClause.sql}`, inClause.params)
-      stats.totalCommission = Number(comm.rows[0]?.total || 0)
-      const wd = await query(`SELECT COALESCE(SUM(amount),0)::numeric total FROM withdrawals WHERE status='PAID' AND agent_id IN ${inClause.sql}`, inClause.params)
-      stats.totalWithdrawalsPaid = Number(wd.rows[0]?.total || 0)
-    }
-    if (req.admin.role === 'SUPER_ADMIN') {
-      const company = await query('SELECT COALESCE(SUM(amount),0)::numeric total FROM company_ledger')
-      stats.totalCompanyIncome = Number(company.rows[0]?.total || 0)
+    const [agentStats, orderStats, comm, wd, company] = await Promise.all([
+      query(
+        `SELECT COUNT(*)::int total, COUNT(*) FILTER (WHERE a.status='ACTIVE')::int active
+         FROM sales_advisers a
+         WHERE ${scoped.sql}`,
+        scoped.params
+      ),
+      query(
+        `SELECT COUNT(*)::int total_orders,
+                COUNT(*) FILTER (WHERE o.status IN ('APPROVED','PAID_BY_REWARD'))::int approved_orders,
+                COALESCE(SUM(o.total_amount) FILTER (WHERE o.status IN ('APPROVED','PAID_BY_REWARD')),0)::numeric total_sales
+         FROM orders o
+         JOIN sales_advisers a ON a.id=o.agent_id
+         WHERE ${scoped.sql}`,
+        scoped.params
+      ),
+      query(
+        `SELECT COALESCE(SUM(c.amount),0)::numeric total
+         FROM commission_ledger c
+         JOIN sales_advisers a ON a.id=c.to_agent_id
+         WHERE ${scoped.sql} AND c.status='PAID_TO_AGENT'`,
+        scoped.params
+      ),
+      query(
+        `SELECT COALESCE(SUM(w.amount),0)::numeric total
+         FROM withdrawals w
+         JOIN sales_advisers a ON a.id=w.agent_id
+         WHERE ${scoped.sql} AND w.status='PAID'`,
+        scoped.params
+      ),
+      req.admin.role === 'SUPER_ADMIN'
+        ? query('SELECT COALESCE(SUM(amount),0)::numeric total FROM company_ledger')
+        : Promise.resolve({ rows: [{ total: 0 }] })
+    ])
+
+    const stats = {
+      totalSales: Number(orderStats.rows[0]?.total_sales || 0),
+      totalOrders: Number(orderStats.rows[0]?.total_orders || 0),
+      approvedOrders: Number(orderStats.rows[0]?.approved_orders || 0),
+      totalCommission: Number(comm.rows[0]?.total || 0),
+      totalWithdrawalsPaid: Number(wd.rows[0]?.total || 0),
+      totalCompanyIncome: Number(company.rows[0]?.total || 0),
+      totalSalesAdvisers: Number(agentStats.rows[0]?.total || 0),
+      activeSalesAdvisers: Number(agentStats.rows[0]?.active || 0)
     }
     res.json({ types, reportTypes: types, stats })
   } catch (err) { next(err) }

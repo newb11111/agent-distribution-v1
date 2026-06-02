@@ -1,0 +1,10 @@
+v1-5-10 independent admin settings
+
+- Removed Super Admin fallback/inheritance for normal Admin commission rules.
+- Normal Admin commission rules now start as zero/empty until saved.
+- Removed Super Admin fallback/inheritance for normal Admin WhatsApp, payment instructions, payment QR and annual fee amount.
+- Annual fee amount is now stored per Admin inside that Admin's own contact/payment settings.
+- Sales Adviser annual fee display, annual-fee proof, manual activation and auto-renewal now use the Sales Adviser's owner Admin settings.
+- Super Admin commission/settings page now has a selector to edit HQ or a specific Admin.
+- New Admin users no longer copy HQ commission/contact settings.
+- Startup cleanup removes old copied HQ settings/rules from normal Admins when they are identical to HQ values.

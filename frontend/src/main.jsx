@@ -466,8 +466,13 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
   const tabs = baseTabs.filter((x) => x === 'adminUsers' ? isSuper : hasAdminPermission(admin, x))
   const [tab, setTab] = useState(tabs[0] || 'dashboard')
   const [data, setData] = useState({})
+  const dataRef = useRef({})
+  const inflightRef = useRef({})
+  const warmupStartedRef = useRef(false)
   const [loading, setLoading] = useState({})
   const [error, setError] = useState('')
+
+  useEffect(() => { dataRef.current = data }, [data])
 
   function adminPathFor(key, params = {}) {
     const query = buildQuery(params)
@@ -485,25 +490,54 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
     return `${map[key] || map.dashboard}${query}`
   }
 
-  async function loadTab(key = tab, params = {}, force = false) {
-    if (!key) return
-    if (key === 'adminUsers' && !isSuper) return
-    if (key !== 'adminUsers' && !hasAdminPermission(admin, key)) return
-    if (data[key] && !force && !Object.keys(params).length) return
-    setError('')
-    setLoading((x) => ({ ...x, [key]: true }))
-    try {
-      const payload = await api(adminPathFor(key, params), {}, 'admin')
-      setData((x) => ({ ...x, [key]: payload }))
-    } catch (err) {
-      setError(err.message)
-      if (err.message === 'UNAUTHORIZED') onLogout()
-    } finally {
-      setLoading((x) => ({ ...x, [key]: false }))
-    }
+  function scheduleAdminWarmup() {
+    if (warmupStartedRef.current) return
+    warmupStartedRef.current = true
+    const warmupTabs = tabs.filter((key) => key !== 'dashboard')
+    warmupTabs.forEach((key, index) => {
+      window.setTimeout(() => {
+        loadTab(key, {}, false, { background: true }).catch(() => null)
+      }, 250 + (index * 250))
+    })
   }
 
-  useEffect(() => { loadTab('dashboard') }, [])
+  async function loadTab(key = tab, params = {}, force = false, options = {}) {
+    if (!key) return null
+    if (key === 'adminUsers' && !isSuper) return null
+    if (key !== 'adminUsers' && !hasAdminPermission(admin, key)) return null
+
+    const hasParams = Boolean(Object.keys(params || {}).length)
+    const requestKey = `${key}:${buildQuery(params)}`
+    if (dataRef.current[key] && !force && !hasParams) return dataRef.current[key]
+    if (inflightRef.current[requestKey] && !force) return inflightRef.current[requestKey]
+
+    if (!options.background) setError('')
+    setLoading((x) => ({ ...x, [key]: true }))
+
+    const request = api(adminPathFor(key, params), {}, 'admin')
+      .then((payload) => {
+        setData((x) => {
+          const next = { ...x, [key]: payload }
+          dataRef.current = next
+          return next
+        })
+        if (key === 'dashboard') scheduleAdminWarmup()
+        return payload
+      })
+      .catch((err) => {
+        if (!options.background) setError(err.message)
+        if (err.message === 'UNAUTHORIZED') onLogout()
+        throw err
+      })
+      .finally(() => {
+        delete inflightRef.current[requestKey]
+        setLoading((x) => ({ ...x, [key]: false }))
+      })
+
+    inflightRef.current[requestKey] = request
+    return request
+  }
+
   useEffect(() => { loadTab(tab) }, [tab])
   useEffect(() => { if (!tabs.includes(tab)) setTab(tabs[0] || 'dashboard') }, [admin?.permissions?.join(','), admin?.role])
 
@@ -1109,8 +1143,14 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
   const tabs = ['dashboard', 'profile', 'team', 'products', 'orders', 'reward', 'withdrawals']
   const [tab, setTab] = useState('dashboard')
   const [data, setData] = useState({})
+  const dataRef = useRef({})
+  const inflightRef = useRef({})
+  const meInflightRef = useRef(null)
+  const warmupStartedRef = useRef(false)
   const [loading, setLoading] = useState({})
   const [error, setError] = useState('')
+
+  useEffect(() => { dataRef.current = data }, [data])
 
   function agentPathFor(key, params = {}) {
     const query = buildQuery(params)
@@ -1128,35 +1168,73 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
   }
 
   async function loadMe(force = false) {
-    if (data.me && !force) return data.me
-    const me = await api(agentPathFor('me'), {}, 'agent')
-    setData((x) => ({ ...x, me }))
-    return me
+    if (dataRef.current.me && !force) return dataRef.current.me
+    if (meInflightRef.current && !force) return meInflightRef.current
+    const request = api(agentPathFor('me'), {}, 'agent')
+      .then((me) => {
+        setData((x) => {
+          const next = { ...x, me }
+          dataRef.current = next
+          return next
+        })
+        return me
+      })
+      .finally(() => { meInflightRef.current = null })
+    meInflightRef.current = request
+    return request
   }
 
-  async function loadTab(key = tab, params = {}, force = false) {
-    if (data[key] && !force && !Object.keys(params).length) return
-    setError('')
+  function scheduleAgentWarmup() {
+    if (warmupStartedRef.current) return
+    warmupStartedRef.current = true
+    const warmupTabs = tabs.filter((key) => !['dashboard', 'profile'].includes(key))
+    warmupTabs.forEach((key, index) => {
+      window.setTimeout(() => {
+        loadTab(key, {}, false, { background: true }).catch(() => null)
+      }, 250 + (index * 250))
+    })
+  }
+
+  async function loadTab(key = tab, params = {}, force = false, options = {}) {
+    const hasParams = Boolean(Object.keys(params || {}).length)
+    const requestKey = `${key}:${buildQuery(params)}`
+    if (dataRef.current[key] && !force && !hasParams) return dataRef.current[key]
+    if (inflightRef.current[requestKey] && !force) return inflightRef.current[requestKey]
+
+    if (!options.background) setError('')
     setLoading((x) => ({ ...x, [key]: true }))
-    try {
+
+    const request = (async () => {
       const needsMe = ['dashboard', 'profile', 'team', 'products', 'reward', 'withdrawals'].includes(key)
-      const mePayload = needsMe ? await loadMe(force && ['dashboard', 'profile'].includes(key)) : data.me
+      const mePayload = needsMe ? await loadMe(force && ['dashboard', 'profile'].includes(key)) : dataRef.current.me
       const payload = key === 'dashboard' || key === 'profile'
         ? mePayload
         : await api(agentPathFor(key, params), {}, 'agent')
+
       setData((x) => {
-        if (key === 'dashboard' || key === 'profile') return { ...x, me: payload, [key]: payload }
-        return { ...x, [key]: payload }
+        const next = key === 'dashboard' || key === 'profile'
+          ? { ...x, me: payload, [key]: payload }
+          : { ...x, [key]: payload }
+        dataRef.current = next
+        return next
       })
-    } catch (err) {
-      setError(err.message)
-      if (err.message === 'UNAUTHORIZED') onLogout()
-    } finally {
-      setLoading((x) => ({ ...x, [key]: false }))
-    }
+      if (key === 'dashboard') scheduleAgentWarmup()
+      return payload
+    })()
+      .catch((err) => {
+        if (!options.background) setError(err.message)
+        if (err.message === 'UNAUTHORIZED') onLogout()
+        throw err
+      })
+      .finally(() => {
+        delete inflightRef.current[requestKey]
+        setLoading((x) => ({ ...x, [key]: false }))
+      })
+
+    inflightRef.current[requestKey] = request
+    return request
   }
 
-  useEffect(() => { loadTab('dashboard') }, [])
   useEffect(() => { loadTab(tab) }, [tab])
 
   const refreshActive = () => loadTab(tab, {}, true)

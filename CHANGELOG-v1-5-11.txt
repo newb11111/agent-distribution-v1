@@ -1,0 +1,16 @@
+v1-5-11 backend speed optimization
+
+Backend-only changes:
+1. Optimized /api/admin/dashboard to return summary using direct aggregate queries.
+2. Dashboard queries now run with Promise.all instead of sequential awaits.
+3. After dashboard responds, backend warms common admin tab queries in the background.
+4. Admin list APIs now scope data using joins instead of loading all agent IDs into large IN clauses:
+   - payment proofs
+   - orders
+   - reward ledger
+   - withdrawals
+5. Report summary now uses joined aggregate queries and Promise.all.
+6. Added extra database indexes for created_at/status/agent query patterns.
+
+Note:
+Frontend-triggered visual preloading still requires frontend changes. This backend version warms the DB/query path after dashboard response without changing frontend UI behavior.
