@@ -135,6 +135,28 @@ function makeInClause(ids, startIndex = 1) {
   return { sql: `(${ids.map((_, i) => `$${i + startIndex}`).join(',')})`, params: ids }
 }
 
+function pageParams(req, defaultLimit = 50, maxLimit = 100) {
+  const page = Math.max(1, Math.floor(num(req.query.page, 1)))
+  const limit = Math.min(maxLimit, Math.max(1, Math.floor(num(req.query.limit, defaultLimit))))
+  const offset = (page - 1) * limit
+  const search = cleanText(req.query.search).toLowerCase()
+  return { page, limit, offset, search }
+}
+
+function paginationMeta(total, page, limit) {
+  const safeTotal = Number(total || 0)
+  return {
+    page,
+    limit,
+    total: safeTotal,
+    totalPages: Math.max(1, Math.ceil(safeTotal / limit))
+  }
+}
+
+function emptyPage(page, limit) {
+  return paginationMeta(0, page, limit)
+}
+
 async function canAccessAgent(admin, agentId) {
   if (admin.role === 'SUPER_ADMIN') return true
   const scope = adminDataScopeId(admin)
@@ -179,9 +201,25 @@ app.get('/api/admin/me', requireAdmin, (req, res) => res.json({ admin: req.admin
 
 app.get('/api/admin/admin-users', requireAdmin, requireSuperAdmin, async (req, res, next) => {
   try {
-    const result = await query('SELECT * FROM admin_users ORDER BY created_at ASC')
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
+    const params = []
+    let where = ''
+    if (search) {
+      params.push(`%${search}%`)
+      where = `WHERE LOWER(code) LIKE $1 OR LOWER(name) LIKE $1 OR LOWER(role) LIKE $1 OR LOWER(status) LIKE $1`
+    }
+    params.push(limit, offset)
+    const result = await query(
+      `SELECT *, COUNT(*) OVER() AS total_count
+       FROM admin_users
+       ${where}
+       ORDER BY created_at ASC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+    const total = result.rows[0]?.total_count || 0
     const admins = result.rows.map(toAdmin)
-    res.json({ admins: admins.map((a) => ({ ...a, passwordHash: undefined })) })
+    res.json({ admins: admins.map((a) => ({ ...a, passwordHash: undefined })), pagination: paginationMeta(total, page, limit) })
   } catch (err) { next(err) }
 })
 
@@ -229,6 +267,20 @@ app.patch('/api/admin/admin-users/:id/permissions', requireAdmin, requireSuperAd
     const permissions = normalizeAdminPermissions(role, req.body.permissions)
     await query('UPDATE admin_users SET permissions=$2, updated_at=NOW() WHERE id=$1', [req.params.id, JSON.stringify(permissions)])
     await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'UPDATE_ADMIN_PERMISSIONS', entityType: 'ADMIN_USER', entityId: req.params.id, metadata: { permissions } })
+    res.json({ ok: true })
+  } catch (err) { next(err) }
+})
+
+app.patch('/api/admin/admin-users/:id/password', requireAdmin, requireSuperAdmin, async (req, res, next) => {
+  try {
+    const password = String(req.body.password || '')
+    if (password.length < 6) return res.status(400).json({ error: 'PASSWORD_MIN_6' })
+    const existing = await query('SELECT role FROM admin_users WHERE id=$1', [req.params.id])
+    const role = existing.rows[0]?.role
+    if (!role || role === 'SUPER_ADMIN') return res.status(400).json({ error: 'INVALID_ADMIN_USER' })
+    const hash = await bcrypt.hash(password, 12)
+    await query('UPDATE admin_users SET password_hash=$2, updated_at=NOW() WHERE id=$1', [req.params.id, hash])
+    await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'UPDATE_ADMIN_PASSWORD', entityType: 'ADMIN_USER', entityId: req.params.id, metadata: { role } })
     res.json({ ok: true })
   } catch (err) { next(err) }
 })
@@ -306,12 +358,48 @@ app.get('/api/admin/dashboard', requireAdmin, requireOfficeAdmin, requireAdminPe
 
 app.get('/api/admin/agents', requireAdmin, requireOfficeAdmin, requireAdminPermission('agents'), async (req, res, next) => {
   try {
-    const where = scopedAgentsWhere(req.admin, 'a')
-    const result = await query(`SELECT a.* FROM sales_advisers a WHERE ${where.sql} ORDER BY a.created_at DESC`, where.params)
-    const admins = (await query('SELECT id, name FROM admin_users')).rows
-    const agents = []
-    for (const row of result.rows) agents.push(await hydrateAgent(row, admins))
-    res.json({ agents, ownerOptions: await ownerOptions() })
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
+    const scoped = scopedAgentsWhere(req.admin, 'a')
+    const params = [...scoped.params]
+    let searchSql = ''
+    if (search) {
+      params.push(`%${search}%`)
+      const i = params.length
+      searchSql = `AND (LOWER(a.agent_code) LIKE $${i} OR LOWER(a.referral_code) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.email) LIKE $${i} OR LOWER(a.status) LIKE $${i} OR LOWER(COALESCE(au.name,'')) LIKE $${i} OR LOWER(COALESCE(s.agent_code,'')) LIKE $${i})`
+    }
+    params.push(limit, offset)
+    const limitIndex = params.length - 1
+    const offsetIndex = params.length
+    const result = await query(
+      `SELECT
+          a.*,
+          s.agent_code AS sponsor_agent_code,
+          s.name AS sponsor_name,
+          CASE WHEN a.owner_admin_id='admin_super' THEN 'HQ / Super Admin' ELSE COALESCE(au.name, a.owner_admin_id, 'HQ / Super Admin') END AS owner_name,
+          COALESCE(b.balance,0)::numeric AS balance,
+          COUNT(*) OVER() AS total_count
+       FROM sales_advisers a
+       LEFT JOIN sales_advisers s ON s.id=a.sponsor_agent_id
+       LEFT JOIN admin_users au ON au.id=a.owner_admin_id
+       LEFT JOIN (
+         SELECT agent_id, COALESCE(SUM(amount),0)::numeric AS balance
+         FROM reward_ledger
+         WHERE status='POSTED'
+         GROUP BY agent_id
+       ) b ON b.agent_id=a.id
+       WHERE ${scoped.sql} ${searchSql}
+       ORDER BY a.created_at DESC
+       LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
+      params
+    )
+    const total = result.rows[0]?.total_count || 0
+    const agents = result.rows.map((row) => toAgent(row, {
+      balance: Number(row.balance || 0),
+      annualFeeDaysLeft: daysLeft(row.annual_fee_expires_at),
+      ownerName: row.owner_name,
+      sponsor: row.sponsor_agent_id ? { id: row.sponsor_agent_id, agentCode: row.sponsor_agent_code, name: row.sponsor_name } : null
+    }))
+    res.json({ agents, ownerOptions: await ownerOptions(), pagination: paginationMeta(total, page, limit) })
   } catch (err) { next(err) }
 })
 
@@ -381,7 +469,21 @@ app.post('/api/admin/agents/:id/reward-credit', requireAdmin, requireSuperAdmin,
 })
 
 app.get('/api/admin/products', requireAdmin, requireOfficeAdmin, requireAdminPermission('products'), async (req, res, next) => {
-  try { const result = await query('SELECT * FROM products ORDER BY created_at DESC'); res.json({ products: result.rows.map(rowToProduct) }) } catch (err) { next(err) }
+  try {
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
+    const params = []
+    let where = ''
+    if (search) {
+      params.push(`%${search}%`)
+      where = `WHERE LOWER(sku) LIKE $1 OR LOWER(name) LIKE $1 OR LOWER(description) LIKE $1`
+    }
+    params.push(limit, offset)
+    const result = await query(
+      `SELECT *, COUNT(*) OVER() AS total_count FROM products ${where} ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+    res.json({ products: result.rows.map(rowToProduct), pagination: paginationMeta(result.rows[0]?.total_count || 0, page, limit) })
+  } catch (err) { next(err) }
 })
 
 app.post('/api/admin/products', requireAdmin, requireOfficeAdmin, requireAdminPermission('products'), async (req, res, next) => {
@@ -466,10 +568,28 @@ app.put('/api/admin/commission-rules', requireAdmin, requireOfficeAdmin, require
 
 app.get('/api/admin/payment-proofs', requireAdmin, requireOfficeAdmin, requireAdminPermission('paymentProofs'), async (req, res, next) => {
   try {
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
     const ids = await scopedAgentIds(req.admin)
+    if (!ids.length) return res.json({ proofs: [], pagination: emptyPage(page, limit) })
     const inClause = makeInClause(ids)
-    const result = ids.length ? await query(`SELECT p.*, a.name AS agent_name, a.agent_code FROM payment_proofs p JOIN sales_advisers a ON a.id=p.agent_id WHERE p.agent_id IN ${inClause.sql} ORDER BY p.created_at DESC`, inClause.params) : { rows: [] }
-    res.json({ proofs: result.rows.map((p) => ({ ...rowToProof(p), agent: { name: p.agent_name, agentCode: p.agent_code } })) })
+    const params = [...inClause.params]
+    let searchSql = ''
+    if (search) {
+      params.push(`%${search}%`)
+      const i = params.length
+      searchSql = `AND (LOWER(p.type) LIKE $${i} OR LOWER(p.status) LIKE $${i} OR LOWER(COALESCE(p.proof_text,'')) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.agent_code) LIKE $${i})`
+    }
+    params.push(limit, offset)
+    const result = await query(
+      `SELECT p.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
+       FROM payment_proofs p
+       JOIN sales_advisers a ON a.id=p.agent_id
+       WHERE p.agent_id IN ${inClause.sql} ${searchSql}
+       ORDER BY p.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+    res.json({ proofs: result.rows.map((p) => ({ ...rowToProof(p), agent: { name: p.agent_name, agentCode: p.agent_code } })), pagination: paginationMeta(result.rows[0]?.total_count || 0, page, limit) })
   } catch (err) { next(err) }
 })
 
@@ -507,29 +627,89 @@ app.post('/api/admin/payment-proofs/:id/reject', requireAdmin, requireOfficeAdmi
 
 app.get('/api/admin/orders', requireAdmin, requireOfficeAdmin, requireAdminPermission('orders'), async (req, res, next) => {
   try {
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
     const ids = await scopedAgentIds(req.admin)
+    if (!ids.length) return res.json({ orders: [], pagination: emptyPage(page, limit) })
     const inClause = makeInClause(ids)
-    const result = ids.length ? await query(`SELECT o.*, a.name AS agent_name, a.agent_code, p.name AS product_name FROM orders o JOIN sales_advisers a ON a.id=o.agent_id JOIN products p ON p.id=o.product_id WHERE o.agent_id IN ${inClause.sql} ORDER BY o.created_at DESC`, inClause.params) : { rows: [] }
-    res.json({ orders: result.rows.map((o) => ({ ...rowToOrder(o), agent: { name: o.agent_name, agentCode: o.agent_code }, product: { name: o.product_name } })) })
+    const params = [...inClause.params]
+    let searchSql = ''
+    if (search) {
+      params.push(`%${search}%`)
+      const i = params.length
+      searchSql = `AND (LOWER(o.id) LIKE $${i} OR LOWER(o.status) LIKE $${i} OR LOWER(o.fulfillment_status) LIKE $${i} OR LOWER(COALESCE(o.customer_name,'')) LIKE $${i} OR LOWER(COALESCE(o.customer_phone,'')) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.agent_code) LIKE $${i} OR LOWER(p.name) LIKE $${i})`
+    }
+    params.push(limit, offset)
+    const result = await query(
+      `SELECT o.*, a.name AS agent_name, a.agent_code, p.name AS product_name, COUNT(*) OVER() AS total_count
+       FROM orders o
+       JOIN sales_advisers a ON a.id=o.agent_id
+       JOIN products p ON p.id=o.product_id
+       WHERE o.agent_id IN ${inClause.sql} ${searchSql}
+       ORDER BY o.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+    res.json({ orders: result.rows.map((o) => ({ ...rowToOrder(o), agent: { name: o.agent_name, agentCode: o.agent_code }, product: { name: o.product_name } })), pagination: paginationMeta(result.rows[0]?.total_count || 0, page, limit) })
   } catch (err) { next(err) }
 })
 
 app.get('/api/admin/wallet-ledger', requireAdmin, requireOfficeAdmin, requireAdminPermission('reward'), async (req, res, next) => {
   try {
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
     const ids = await scopedAgentIds(req.admin)
-    const inClause = makeInClause(ids)
-    const reward = ids.length ? await query(`SELECT w.*, a.name AS agent_name, a.agent_code FROM reward_ledger w JOIN sales_advisers a ON a.id=w.agent_id WHERE w.agent_id IN ${inClause.sql} ORDER BY w.created_at DESC LIMIT 500`, inClause.params) : { rows: [] }
-    const companyLedger = req.admin.role === 'SUPER_ADMIN' ? (await query('SELECT * FROM company_ledger ORDER BY created_at DESC LIMIT 500')).rows.map(rowToCompany) : []
-    res.json({ rows: reward.rows.map((w) => ({ ...rowToLedger(w), agent: { name: w.agent_name, agentCode: w.agent_code } })), companyLedger })
+    let rows = []
+    let total = 0
+    if (ids.length) {
+      const inClause = makeInClause(ids)
+      const params = [...inClause.params]
+      let searchSql = ''
+      if (search) {
+        params.push(`%${search}%`)
+        const i = params.length
+        searchSql = `AND (LOWER(w.type) LIKE $${i} OR LOWER(w.source_type) LIKE $${i} OR LOWER(COALESCE(w.note,'')) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.agent_code) LIKE $${i})`
+      }
+      params.push(limit, offset)
+      const reward = await query(
+        `SELECT w.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
+         FROM reward_ledger w
+         JOIN sales_advisers a ON a.id=w.agent_id
+         WHERE w.agent_id IN ${inClause.sql} ${searchSql}
+         ORDER BY w.created_at DESC
+         LIMIT $${params.length - 1} OFFSET $${params.length}`,
+        params
+      )
+      rows = reward.rows.map((w) => ({ ...rowToLedger(w), agent: { name: w.agent_name, agentCode: w.agent_code } }))
+      total = reward.rows[0]?.total_count || 0
+    }
+    const companyLedger = req.admin.role === 'SUPER_ADMIN' ? (await query('SELECT * FROM company_ledger ORDER BY created_at DESC LIMIT 100')).rows.map(rowToCompany) : []
+    res.json({ rows, companyLedger, pagination: paginationMeta(total, page, limit) })
   } catch (err) { next(err) }
 })
 
 app.get('/api/admin/withdrawals', requireAdmin, requireOfficeAdmin, requireAdminPermission('withdrawals'), async (req, res, next) => {
   try {
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
     const ids = await scopedAgentIds(req.admin)
+    if (!ids.length) return res.json({ withdrawals: [], pagination: emptyPage(page, limit) })
     const inClause = makeInClause(ids)
-    const result = ids.length ? await query(`SELECT w.*, a.name AS agent_name, a.agent_code FROM withdrawals w JOIN sales_advisers a ON a.id=w.agent_id WHERE w.agent_id IN ${inClause.sql} ORDER BY w.created_at DESC`, inClause.params) : { rows: [] }
-    res.json({ withdrawals: result.rows.map((w) => ({ ...rowToWithdrawal(w), agent: { name: w.agent_name, agentCode: w.agent_code } })) })
+    const params = [...inClause.params]
+    let searchSql = ''
+    if (search) {
+      params.push(`%${search}%`)
+      const i = params.length
+      searchSql = `AND (LOWER(w.status) LIKE $${i} OR LOWER(COALESCE(w.reject_reason,'')) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.agent_code) LIKE $${i})`
+    }
+    params.push(limit, offset)
+    const result = await query(
+      `SELECT w.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
+       FROM withdrawals w
+       JOIN sales_advisers a ON a.id=w.agent_id
+       WHERE w.agent_id IN ${inClause.sql} ${searchSql}
+       ORDER BY w.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+    res.json({ withdrawals: result.rows.map((w) => ({ ...rowToWithdrawal(w), agent: { name: w.agent_name, agentCode: w.agent_code } })), pagination: paginationMeta(result.rows[0]?.total_count || 0, page, limit) })
   } catch (err) { next(err) }
 })
 
@@ -577,9 +757,9 @@ async function reportData(type, admin) {
   const inClause = makeInClause(ids)
   const rows = []
   if (type === 'orders') {
-    rows.push(['Order ID','Sales Adviser','Agent Code','Product','Qty','Total RM','Customer','Phone','Address','Status','Fulfillment','Created At'])
+    rows.push(['Order ID','Sales Adviser','Agent Code','Product','Qty','Total RM','Customer','Phone','Address','Status','Fulfillment','Courier','Tracking Number','Created At'])
     const data = ids.length ? await query(`SELECT o.*, a.name agent_name, a.agent_code, p.name product_name FROM orders o JOIN sales_advisers a ON a.id=o.agent_id JOIN products p ON p.id=o.product_id WHERE o.agent_id IN ${inClause.sql} ORDER BY o.created_at DESC`, inClause.params) : { rows: [] }
-    data.rows.forEach((o) => rows.push([o.id, o.agent_name, o.agent_code, o.product_name, o.qty, Number(o.total_amount), o.customer_name, o.customer_phone, o.delivery_address, o.status, o.fulfillment_status, o.created_at]))
+    data.rows.forEach((o) => rows.push([o.id, o.agent_name, o.agent_code, o.product_name, o.qty, Number(o.total_amount), o.customer_name, o.customer_phone, o.delivery_address, o.status, o.fulfillment_status, o.courier, o.tracking_number, o.created_at]))
   } else if (type === 'salesAdvisers') {
     rows.push(['Agent Code','Name','Email','Status','Owner Admin ID','Sponsor ID','Annual Fee Expire','Created At'])
     const data = ids.length ? await query(`SELECT * FROM sales_advisers WHERE id IN ${inClause.sql} ORDER BY created_at DESC`, inClause.params) : { rows: [] }
@@ -610,9 +790,31 @@ async function reportData(type, admin) {
   return rows
 }
 
-app.get('/api/admin/reports/summary', requireAdmin, requireOfficeAdmin, requireAdminPermission('reports'), async (req, res) => {
-  const types = ['orders', 'paymentProofs', 'commissions', 'rewardLedger', 'withdrawals', 'salesAdvisers', ...(req.admin.role === 'SUPER_ADMIN' ? ['companyLedger'] : [])]
-  res.json({ types })
+app.get('/api/admin/reports/summary', requireAdmin, requireOfficeAdmin, requireAdminPermission('reports'), async (req, res, next) => {
+  try {
+    const ids = await scopedAgentIds(req.admin)
+    const inClause = makeInClause(ids)
+    const types = ['orders', 'commissions', 'rewardLedger', 'withdrawals', 'salesAdvisers', ...(req.admin.role === 'SUPER_ADMIN' ? ['companyLedger'] : [])]
+    const stats = { totalSales: 0, totalOrders: 0, approvedOrders: 0, totalCommission: 0, totalWithdrawalsPaid: 0, totalCompanyIncome: 0, totalSalesAdvisers: ids.length, activeSalesAdvisers: 0 }
+    if (ids.length) {
+      const agentStats = await query(`SELECT COUNT(*)::int total, COUNT(*) FILTER (WHERE status='ACTIVE')::int active FROM sales_advisers WHERE id IN ${inClause.sql}`, inClause.params)
+      stats.totalSalesAdvisers = Number(agentStats.rows[0]?.total || 0)
+      stats.activeSalesAdvisers = Number(agentStats.rows[0]?.active || 0)
+      const orderStats = await query(`SELECT COUNT(*)::int total_orders, COUNT(*) FILTER (WHERE status IN ('APPROVED','PAID_BY_REWARD'))::int approved_orders, COALESCE(SUM(total_amount) FILTER (WHERE status IN ('APPROVED','PAID_BY_REWARD')),0)::numeric total_sales FROM orders WHERE agent_id IN ${inClause.sql}`, inClause.params)
+      stats.totalOrders = Number(orderStats.rows[0]?.total_orders || 0)
+      stats.approvedOrders = Number(orderStats.rows[0]?.approved_orders || 0)
+      stats.totalSales = Number(orderStats.rows[0]?.total_sales || 0)
+      const comm = await query(`SELECT COALESCE(SUM(amount),0)::numeric total FROM commission_ledger WHERE status='PAID_TO_AGENT' AND to_agent_id IN ${inClause.sql}`, inClause.params)
+      stats.totalCommission = Number(comm.rows[0]?.total || 0)
+      const wd = await query(`SELECT COALESCE(SUM(amount),0)::numeric total FROM withdrawals WHERE status='PAID' AND agent_id IN ${inClause.sql}`, inClause.params)
+      stats.totalWithdrawalsPaid = Number(wd.rows[0]?.total || 0)
+    }
+    if (req.admin.role === 'SUPER_ADMIN') {
+      const company = await query('SELECT COALESCE(SUM(amount),0)::numeric total FROM company_ledger')
+      stats.totalCompanyIncome = Number(company.rows[0]?.total || 0)
+    }
+    res.json({ types, reportTypes: types, stats })
+  } catch (err) { next(err) }
 })
 
 app.get('/api/admin/reports/:type.xls', requireAdmin, requireOfficeAdmin, requireAdminPermission('reports'), async (req, res, next) => {
@@ -688,7 +890,21 @@ app.get('/api/agent/team', requireAgent, async (req, res, next) => {
 app.post('/api/agent/invite-code', requireAgent, requireActiveAgent, async (req, res) => res.json({ code: req.agent.referralCode || req.agent.agentCode }))
 
 app.get('/api/agent/products', requireAgent, async (req, res, next) => {
-  try { const result = await query('SELECT * FROM products WHERE is_active=TRUE ORDER BY created_at DESC'); res.json({ products: result.rows.map(rowToProduct) }) } catch (err) { next(err) }
+  try {
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
+    const params = []
+    let searchSql = ''
+    if (search) {
+      params.push(`%${search}%`)
+      searchSql = `AND (LOWER(sku) LIKE $1 OR LOWER(name) LIKE $1 OR LOWER(description) LIKE $1)`
+    }
+    params.push(limit, offset)
+    const result = await query(
+      `SELECT *, COUNT(*) OVER() AS total_count FROM products WHERE is_active=TRUE ${searchSql} ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+    res.json({ products: result.rows.map(rowToProduct), pagination: paginationMeta(result.rows[0]?.total_count || 0, page, limit) })
+  } catch (err) { next(err) }
 })
 
 app.post('/api/agent/payment-proof/annual-fee', requireAgent, async (req, res, next) => {
@@ -730,14 +946,47 @@ app.post('/api/agent/orders', requireAgent, requireActiveAgent, async (req, res,
 
 app.get('/api/agent/orders', requireAgent, async (req, res, next) => {
   try {
-    const result = await query('SELECT o.*, p.name product_name FROM orders o JOIN products p ON p.id=o.product_id WHERE o.agent_id=$1 ORDER BY o.created_at DESC', [req.agent.id])
-    res.json({ orders: result.rows.map((o) => ({ ...rowToOrder(o), product: { name: o.product_name } })) })
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
+    const params = [req.agent.id]
+    let searchSql = ''
+    if (search) {
+      params.push(`%${search}%`)
+      const i = params.length
+      searchSql = `AND (LOWER(o.id) LIKE $${i} OR LOWER(o.status) LIKE $${i} OR LOWER(o.fulfillment_status) LIKE $${i} OR LOWER(COALESCE(o.customer_name,'')) LIKE $${i} OR LOWER(COALESCE(o.customer_phone,'')) LIKE $${i} OR LOWER(p.name) LIKE $${i})`
+    }
+    params.push(limit, offset)
+    const result = await query(
+      `SELECT o.*, p.name product_name, COUNT(*) OVER() AS total_count
+       FROM orders o
+       JOIN products p ON p.id=o.product_id
+       WHERE o.agent_id=$1 ${searchSql}
+       ORDER BY o.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+    res.json({ orders: result.rows.map((o) => ({ ...rowToOrder(o), product: { name: o.product_name } })), pagination: paginationMeta(result.rows[0]?.total_count || 0, page, limit) })
   } catch (err) { next(err) }
 })
 
 app.get('/api/agent/wallet', requireAgent, async (req, res, next) => {
   try {
-    const rows = await query('SELECT * FROM reward_ledger WHERE agent_id=$1 ORDER BY created_at DESC LIMIT 100', [req.agent.id])
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
+    const params = [req.agent.id]
+    let searchSql = ''
+    if (search) {
+      params.push(`%${search}%`)
+      const i = params.length
+      searchSql = `AND (LOWER(type) LIKE $${i} OR LOWER(source_type) LIKE $${i} OR LOWER(COALESCE(note,'')) LIKE $${i})`
+    }
+    params.push(limit, offset)
+    const rows = await query(
+      `SELECT *, COUNT(*) OVER() AS total_count
+       FROM reward_ledger
+       WHERE agent_id=$1 ${searchSql}
+       ORDER BY created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
     const commission = await query('SELECT * FROM commission_ledger WHERE to_agent_id=$1 ORDER BY created_at DESC LIMIT 100', [req.agent.id])
     const withdrawals = await query('SELECT * FROM withdrawals WHERE agent_id=$1 ORDER BY created_at DESC LIMIT 100', [req.agent.id])
     const ledger = rows.rows.map(rowToLedger)
@@ -746,7 +995,8 @@ app.get('/api/agent/wallet', requireAgent, async (req, res, next) => {
       ledger,
       rows: ledger,
       commissions: commission.rows.map((c) => ({ id: c.id, generation: c.generation, sourceType: c.source_type, amount: Number(c.amount), status: c.status, createdAt: c.created_at })),
-      withdrawals: withdrawals.rows.map(rowToWithdrawal)
+      withdrawals: withdrawals.rows.map(rowToWithdrawal),
+      pagination: paginationMeta(rows.rows[0]?.total_count || 0, page, limit)
     })
   } catch (err) { next(err) }
 })
