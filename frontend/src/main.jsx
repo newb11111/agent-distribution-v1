@@ -1461,7 +1461,7 @@ function AgentProducts({ t, products, pagination, reload, agent }) {
       </Card>
       <Card>
         <div className="section-head"><h3>{t('productList')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
-        <Table><tbody>{products.length ? products.map((p) => <tr key={p.id}><td>{p.sku}</td><td>{p.name}</td><td>{p.description}</td><td>{money(p.price)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+        <Table><thead><tr><th>{t('sku')}</th><th>{t('productName')}</th><th>{t('description')}</th><th>{t('price')}</th></tr></thead><tbody>{products.length ? products.map((p) => <tr key={p.id}><td>{p.sku}</td><td>{p.name}</td><td>{p.description}</td><td>{money(p.price)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
         <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
       </Card>
     </>

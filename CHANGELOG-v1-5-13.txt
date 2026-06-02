@@ -1,0 +1,8 @@
+# v1-5-13 Product Code i18n fix
+
+- Fixed product SKU / item code translation.
+  - Chinese: 货品编号
+  - English: Product Code
+  - BM: Kod Produk
+- Added translated table headers to the Sales Adviser product list so the product code column also follows language switching.
+- Based on v1-5-12 frontend preload + backend v1-5-11.
