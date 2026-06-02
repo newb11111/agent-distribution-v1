@@ -9,8 +9,8 @@ import {
   ADMIN_PERMISSION_KEYS,
   DEFAULT_LEADER_PERMISSIONS,
   audit,
-  copyDefaultCommissionRulesToOwner,
   daysLeft,
+  getAdminAnnualFeeAmount,
   getAdminContactSettings,
   getSetting,
   initDatabase,
@@ -239,11 +239,8 @@ app.post('/api/admin/admin-users', requireAdmin, requireSuperAdmin, async (req, 
        VALUES ($1,$2,$3,$4,$5,$6,'ACTIVE',$7)`,
       [id, code, hash, name, role, JSON.stringify(permissions), scope]
     )
-    if (role === 'LEADER') {
-      await copyDefaultCommissionRulesToOwner(id)
-      const hqContact = await getAdminContactSettings('admin_super')
-      await setAdminContactSettings(id, hqContact)
-    }
+    // Normal Admins now start with empty independent commission/contact settings.
+    // They no longer inherit or copy Super Admin settings.
     await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'CREATE_ADMIN_USER', entityType: 'ADMIN_USER', entityId: id, metadata: { role, permissions } })
     res.json({ ok: true, id })
   } catch (err) { next(err) }
@@ -335,7 +332,7 @@ app.get('/api/config', async (req, res, next) => {
   try {
     
     const adminContact = await getAdminContactSettings('admin_super')
-    res.json({ annualFeeAmount: await getSetting('annualFeeAmount', 365), adminWhatsapp: adminContact.whatsapp, adminContact })
+    res.json({ annualFeeAmount: adminContact.annualFeeAmount, adminWhatsapp: adminContact.whatsapp, adminContact })
   } catch (err) { next(err) }
 })
 
@@ -440,7 +437,8 @@ app.patch('/api/admin/agents/:id/status', requireAdmin, requireOfficeAdmin, requ
       if (status === 'ACTIVE') {
         const hasValidAnnualFee = daysLeft(agent.annual_fee_expires_at) > 0
         if (!hasValidAnnualFee) {
-          const amount = roundMoney(await getSetting('annualFeeAmount', 365))
+          const amount = roundMoney(await getAdminAnnualFeeAmount(agent.owner_admin_id || 'admin_super', client))
+          if (amount <= 0) throw new Error('ANNUAL_FEE_NOT_SET')
           activation = await activateAnnualFee(client, {
             agentId: agent.id,
             amount,
@@ -515,8 +513,9 @@ app.get('/api/admin/commission-rules', requireAdmin, requireOfficeAdmin, require
     const adminContact = await getAdminContactSettings(ownerAdminId)
     res.json({
       ownerAdminId,
+      ownerOptions: req.admin.role === 'SUPER_ADMIN' ? await ownerOptions() : [],
       rules: { product, annualFee },
-      annualFeeAmount: await getSetting('annualFeeAmount', 365),
+      annualFeeAmount: adminContact.annualFeeAmount,
       adminWhatsapp: adminContact.whatsapp,
       adminContact
     })
@@ -542,12 +541,8 @@ app.put('/api/admin/commission-rules', requireAdmin, requireOfficeAdmin, require
           )
         }
       }
-      await client.query(
-        `INSERT INTO system_settings (key, value, updated_at) VALUES ('annualFeeAmount',$1,NOW())
-         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()`,
-        [JSON.stringify(roundMoney(req.body.annualFeeAmount || 365))]
-      )
       const savedContact = await setAdminContactSettings(ownerAdminId, {
+        annualFeeAmount: roundMoney(req.body.annualFeeAmount || 0),
         whatsapp: cleanText(req.body.adminWhatsapp),
         whatsappText: cleanText(req.body.whatsappText),
         paymentInstructions: cleanText(req.body.paymentInstructions),
@@ -557,7 +552,7 @@ app.put('/api/admin/commission-rules', requireAdmin, requireOfficeAdmin, require
         await client.query(
           `INSERT INTO system_settings (key, value, updated_at) VALUES ('adminWhatsapp',$1,NOW())
            ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()`,
-          [JSON.stringify(savedContact.whatsapp || '60123456789')]
+          [JSON.stringify(savedContact.whatsapp || '')]
         )
       }
       await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'UPDATE_COMMISSION_RULES', entityType: 'COMMISSION_RULES', entityId: ownerAdminId, metadata: { ownerAdminId }, client })
@@ -858,7 +853,7 @@ app.get('/api/agent/me', requireAgent, async (req, res, next) => {
     const adminContact = await getAdminContactSettings(row?.owner_admin_id || 'admin_super')
     res.json({
       agent: await hydrateAgent(row),
-      annualFeeAmount: await getSetting('annualFeeAmount', 365),
+      annualFeeAmount: adminContact.annualFeeAmount,
       adminWhatsapp: adminContact.whatsapp,
       adminContact
     })
@@ -909,11 +904,12 @@ app.get('/api/agent/products', requireAgent, async (req, res, next) => {
 
 app.post('/api/agent/payment-proof/annual-fee', requireAgent, async (req, res, next) => {
   try {
-    const amount = roundMoney(await getSetting('annualFeeAmount', 365))
     const proofText = cleanText(req.body.proofText)
     const result = await tx(async (client) => {
       const agent = (await client.query('SELECT * FROM sales_advisers WHERE id=$1 FOR UPDATE', [req.agent.id])).rows[0]
       if (!agent) throw new Error('AGENT_NOT_FOUND')
+      const amount = roundMoney(await getAdminAnnualFeeAmount(agent.owner_admin_id || 'admin_super', client))
+      if (amount <= 0) throw new Error('ANNUAL_FEE_NOT_SET')
       if (agent.status === 'ACTIVE' && daysLeft(agent.annual_fee_expires_at) > 0) throw new Error('ANNUAL_FEE_ALREADY_ACTIVE')
       const pending = await client.query(
         `SELECT id FROM payment_proofs WHERE agent_id=$1 AND type='ANNUAL_FEE' AND status='PENDING' LIMIT 1`,

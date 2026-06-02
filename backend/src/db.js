@@ -276,14 +276,58 @@ export async function initDatabase() {
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_commission_rules_owner_kind_generation ON commission_rules(owner_admin_id, kind, generation)`)
 
   await seedDefaultData()
+  await clearCopiedHqDefaultsForLeaders()
+}
+
+
+async function clearCopiedHqDefaultsForLeaders() {
+  const leaders = await query("SELECT id FROM admin_users WHERE role='LEADER'")
+  const hqContactRaw = (await query("SELECT value FROM system_settings WHERE key=$1", [adminContactSettingKey('admin_super')])).rows[0]?.value
+  const hqContact = jsonValue(hqContactRaw, null)
+
+  for (const row of leaders.rows) {
+    const ownerId = row.id
+    const ownContactRaw = (await query('SELECT value FROM system_settings WHERE key=$1', [adminContactSettingKey(ownerId)])).rows[0]?.value
+    const ownContact = jsonValue(ownContactRaw, null)
+    if (hqContact && ownContact && JSON.stringify(ownContact) === JSON.stringify(hqContact)) {
+      await query('DELETE FROM system_settings WHERE key=$1', [adminContactSettingKey(ownerId)])
+    }
+
+    const sameRules = await query(
+      `WITH owner_rules AS (
+         SELECT kind, generation, type, value::numeric FROM commission_rules WHERE owner_admin_id=$1
+       ), hq_rules AS (
+         SELECT kind, generation, type, value::numeric FROM commission_rules WHERE owner_admin_id='admin_super'
+       ), diff AS (
+         (SELECT * FROM owner_rules EXCEPT SELECT * FROM hq_rules)
+         UNION ALL
+         (SELECT * FROM hq_rules EXCEPT SELECT * FROM owner_rules)
+       )
+       SELECT
+         (SELECT COUNT(*)::int FROM owner_rules) AS owner_count,
+         (SELECT COUNT(*)::int FROM diff) AS diff_count`,
+      [ownerId]
+    )
+    const ownerCount = Number(sameRules.rows[0]?.owner_count || 0)
+    const diffCount = Number(sameRules.rows[0]?.diff_count || 0)
+    if (ownerCount > 0 && diffCount === 0) {
+      await query('DELETE FROM commission_rules WHERE owner_admin_id=$1', [ownerId])
+    }
+  }
 }
 
 async function seedDefaultData() {
   const annualFeeAmount = Number(process.env.ANNUAL_FEE_AMOUNT || 365)
   const adminWhatsapp = process.env.ADMIN_WHATSAPP || '60123456789'
-  await setSetting('annualFeeAmount', annualFeeAmount)
-  await setSetting('adminWhatsapp', adminWhatsapp)
-  await setAdminContactSettings('admin_super', { whatsapp: adminWhatsapp })
+  // HQ settings are seeded only for the Super Admin owner. Normal Admins start blank
+  // until they save their own WhatsApp / payment / annual fee settings.
+  await setSetting('annualFeeAmount', annualFeeAmount) // legacy fallback for older data only
+  await setSetting('adminWhatsapp', adminWhatsapp) // legacy fallback for older data only
+  const hqContactKey = adminContactSettingKey('admin_super')
+  const hqContactExists = await query('SELECT 1 FROM system_settings WHERE key=$1', [hqContactKey])
+  if (!hqContactExists.rowCount) {
+    await setAdminContactSettings('admin_super', { whatsapp: adminWhatsapp, annualFeeAmount })
+  }
 
   const adminCode = process.env.ADMIN_CODE || 'admin'
   const adminPassword = process.env.ADMIN_PASSWORD || 'admin123'
@@ -335,8 +379,8 @@ async function seedDefaultData() {
     )
   }
 
-  const leaders = await query("SELECT id FROM admin_users WHERE role='LEADER'")
-  for (const row of leaders.rows) await copyDefaultCommissionRulesToOwner(row.id)
+  // Do not copy HQ commission rules into normal Admins. Each Admin starts with
+  // an empty/zero rule set and must save their own independent rules.
 
   const demoProduct = await query('SELECT id FROM products WHERE sku=$1', ['DEMO-001'])
   if (!demoProduct.rowCount && process.env.SEED_DEMO_DATA !== 'false') {
@@ -375,19 +419,9 @@ async function seedDefaultData() {
 }
 
 export async function copyDefaultCommissionRulesToOwner(ownerAdminId, client = null) {
-  if (!ownerAdminId || ownerAdminId === 'admin_super' || ownerAdminId === 'ALL') return
-  const q = client || { query }
-  const existing = await q.query('SELECT COUNT(*)::int AS n FROM commission_rules WHERE owner_admin_id=$1', [ownerAdminId])
-  if (Number(existing.rows[0]?.n || 0) > 0) return
-  const defaults = await q.query("SELECT kind, generation, type, value FROM commission_rules WHERE owner_admin_id='admin_super' ORDER BY kind, generation")
-  for (const r of defaults.rows) {
-    await q.query(
-      `INSERT INTO commission_rules (id, owner_admin_id, kind, generation, type, value)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (owner_admin_id, kind, generation) DO NOTHING`,
-      [uid('rule'), ownerAdminId, r.kind, Number(r.generation), r.type, Number(r.value || 0)]
-    )
-  }
+  // Deprecated: older versions copied HQ rules into every Admin, which made the
+  // rules look shared. Keep this as a safe no-op for backward compatibility.
+  return null
 }
 
 
@@ -397,10 +431,13 @@ export function adminContactSettingKey(ownerAdminId = 'admin_super') {
   return `adminContact:${owner}`
 }
 
-export function defaultAdminContact(whatsapp = null) {
+export function defaultAdminContact(ownerAdminId = 'admin_super') {
+  const owner = String(ownerAdminId || 'admin_super').trim() || 'admin_super'
+  const isHq = owner === 'admin_super'
   return {
-    whatsapp: String(whatsapp || process.env.ADMIN_WHATSAPP || '60123456789').trim(),
-    whatsappText: 'Hi Admin, I want to pay annual fee {amount}. Sales Adviser: {agentCode} ({agentName})',
+    annualFeeAmount: isHq ? roundMoney(process.env.ANNUAL_FEE_AMOUNT || 365) : 0,
+    whatsapp: isHq ? String(process.env.ADMIN_WHATSAPP || '60123456789').trim() : '',
+    whatsappText: isHq ? 'Hi Admin, I want to pay annual fee {amount}. Sales Adviser: {agentCode} ({agentName})' : '',
     paymentInstructions: '',
     paymentQrImage: ''
   }
@@ -408,20 +445,25 @@ export function defaultAdminContact(whatsapp = null) {
 
 export async function getAdminContactSettings(ownerAdminId = 'admin_super', client = null) {
   const q = client || pool
-  const key = adminContactSettingKey(ownerAdminId)
+  const owner = String(ownerAdminId || 'admin_super').trim() || 'admin_super'
+  const key = adminContactSettingKey(owner)
   const own = await q.query('SELECT value FROM system_settings WHERE key=$1', [key])
-  const legacy = await q.query("SELECT value FROM system_settings WHERE key='adminWhatsapp'")
-  const legacyWhatsapp = legacy.rows[0]?.value || process.env.ADMIN_WHATSAPP || '60123456789'
-  const fallback = defaultAdminContact(legacyWhatsapp)
   const saved = jsonValue(own.rows[0]?.value, {})
+  const fallback = defaultAdminContact(owner)
   return {
     ...fallback,
     ...saved,
-    whatsapp: String(saved.whatsapp || fallback.whatsapp || '').trim(),
-    whatsappText: String(saved.whatsappText || fallback.whatsappText || '').trim(),
-    paymentInstructions: String(saved.paymentInstructions || '').trim(),
-    paymentQrImage: String(saved.paymentQrImage || '').trim()
+    annualFeeAmount: roundMoney(saved.annualFeeAmount ?? fallback.annualFeeAmount ?? 0),
+    whatsapp: String(saved.whatsapp ?? fallback.whatsapp ?? '').trim(),
+    whatsappText: String(saved.whatsappText ?? fallback.whatsappText ?? '').trim(),
+    paymentInstructions: String(saved.paymentInstructions ?? fallback.paymentInstructions ?? '').trim(),
+    paymentQrImage: String(saved.paymentQrImage ?? fallback.paymentQrImage ?? '').trim()
   }
+}
+
+export async function getAdminAnnualFeeAmount(ownerAdminId = 'admin_super', client = null) {
+  const settings = await getAdminContactSettings(ownerAdminId, client)
+  return roundMoney(settings.annualFeeAmount || 0)
 }
 
 export async function setAdminContactSettings(ownerAdminId = 'admin_super', settings = {}, client = null) {
@@ -430,6 +472,7 @@ export async function setAdminContactSettings(ownerAdminId = 'admin_super', sett
   const current = await getAdminContactSettings(ownerAdminId, q)
   const next = {
     ...current,
+    annualFeeAmount: roundMoney(settings.annualFeeAmount ?? current.annualFeeAmount ?? 0),
     whatsapp: String(settings.whatsapp ?? current.whatsapp ?? '').trim(),
     whatsappText: String(settings.whatsappText ?? current.whatsappText ?? '').trim(),
     paymentInstructions: String(settings.paymentInstructions ?? current.paymentInstructions ?? '').trim(),

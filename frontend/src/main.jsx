@@ -906,14 +906,28 @@ function AdminProofs({ t, proofs, pagination, reload }) {
 
 function AdminRules({ t, rulesData, reload, isSuper = false }) {
   const adminContact = rulesData.adminContact || {}
+  const ownerOptions = Array.isArray(rulesData.ownerOptions) && rulesData.ownerOptions.length ? rulesData.ownerOptions : [{ id: rulesData.ownerAdminId || 'admin_super', name: t('hqOwner') }]
+  const [selectedOwnerId, setSelectedOwnerId] = useState(rulesData.ownerAdminId || 'admin_super')
   const [product, setProduct] = useState(rulesData.rules.product)
   const [annualFee, setAnnualFee] = useState(rulesData.rules.annualFee)
-  const [annualFeeAmount, setAnnualFeeAmount] = useState(rulesData.annualFeeAmount)
-  const [adminWhatsapp, setAdminWhatsapp] = useState(adminContact.whatsapp || rulesData.adminWhatsapp || '')
+  const [annualFeeAmount, setAnnualFeeAmount] = useState(adminContact.annualFeeAmount ?? rulesData.annualFeeAmount ?? '')
+  const [adminWhatsapp, setAdminWhatsapp] = useState(adminContact.whatsapp || '')
   const [whatsappText, setWhatsappText] = useState(adminContact.whatsappText || '')
   const [paymentInstructions, setPaymentInstructions] = useState(adminContact.paymentInstructions || '')
   const [paymentQrImage, setPaymentQrImage] = useState(adminContact.paymentQrImage || '')
   const [notice, setNotice] = useState(null)
+
+  useEffect(() => {
+    const contact = rulesData.adminContact || {}
+    setSelectedOwnerId(rulesData.ownerAdminId || 'admin_super')
+    setProduct(rulesData.rules.product)
+    setAnnualFee(rulesData.rules.annualFee)
+    setAnnualFeeAmount(contact.annualFeeAmount ?? rulesData.annualFeeAmount ?? '')
+    setAdminWhatsapp(contact.whatsapp || '')
+    setWhatsappText(contact.whatsappText || '')
+    setPaymentInstructions(contact.paymentInstructions || '')
+    setPaymentQrImage(contact.paymentQrImage || '')
+  }, [rulesData.ownerAdminId])
 
   function updateRule(kind, idx, patch) {
     const setter = kind === 'product' ? setProduct : setAnnualFee
@@ -937,10 +951,10 @@ function AdminRules({ t, rulesData, reload, isSuper = false }) {
     try {
       await api('/api/admin/commission-rules', {
         method: 'PUT',
-        body: { product, annualFee, annualFeeAmount, adminWhatsapp, whatsappText, paymentInstructions, paymentQrImage }
+        body: { ownerAdminId: selectedOwnerId, product, annualFee, annualFeeAmount, adminWhatsapp, whatsappText, paymentInstructions, paymentQrImage }
       }, 'admin')
       showSuccess(setNotice, t, 'saved')
-      reload()
+      reload({ ownerAdminId: selectedOwnerId })
     } catch (err) { showError(setNotice, t, err) }
   }
 
@@ -965,6 +979,7 @@ function AdminRules({ t, rulesData, reload, isSuper = false }) {
       <div className="section-head"><h3>{t('commissionRules')}</h3><div className="row gap">{isSuper && <Button variant="secondary" onClick={runRenewal}>{t('runRenewalCheck')}</Button>}<Button onClick={save}>{t('save')}</Button></div></div>
       <div className="notice">{t('adminContactSettingsHint')}</div>
       <div className="form-grid small">
+        {isSuper && <Field label={t('editAdminSettingsFor')}><select value={selectedOwnerId} onChange={(e) => { setSelectedOwnerId(e.target.value); reload({ ownerAdminId: e.target.value }) }}>{ownerOptions.map((o) => <option key={o.id} value={o.id}>{o.id === 'admin_super' ? t('hqOwner') : o.name}</option>)}</select></Field>}
         <Field label={t('annualFeeAmount')}><input type="number" value={annualFeeAmount} onChange={(e) => setAnnualFeeAmount(e.target.value)} /></Field>
         <Field label={t('adminWhatsapp')}><input value={adminWhatsapp} onChange={(e) => setAdminWhatsapp(e.target.value)} placeholder="60123456789" /></Field>
         <Field label={t('whatsappText')}><textarea value={whatsappText} onChange={(e) => setWhatsappText(e.target.value)} placeholder={t('whatsappTextPlaceholder')} /></Field>

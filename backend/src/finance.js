@@ -1,4 +1,4 @@
-import { addDays, audit, daysLeft, jsonValue, query, roundMoney, tx, uid } from './db.js'
+import { addDays, audit, daysLeft, getAdminAnnualFeeAmount, jsonValue, query, roundMoney, tx, uid } from './db.js'
 
 export async function getAgentBalance(agentId, client = null) {
   const q = client || { query }
@@ -97,17 +97,19 @@ async function creditCompany(client, { amount, sourceType, sourceId, note }) {
 
 export async function getRules(client, kind, ownerAdminId = 'admin_super') {
   const owner = ownerAdminId || 'admin_super'
+  const max = kind === 'annualFee' ? 5 : 10
   const res = await client.query(
-    `SELECT DISTINCT ON (generation) generation, type, value
-     FROM (
-       SELECT generation, type, value, 1 AS priority FROM commission_rules WHERE kind=$1 AND owner_admin_id=$2
-       UNION ALL
-       SELECT generation, type, value, 2 AS priority FROM commission_rules WHERE kind=$1 AND owner_admin_id='admin_super'
-     ) x
-     ORDER BY generation ASC, priority ASC`,
+    `SELECT generation, type, value
+     FROM commission_rules
+     WHERE kind=$1 AND owner_admin_id=$2
+     ORDER BY generation ASC`,
     [kind, owner]
   )
-  return res.rows.map((r) => ({ generation: Number(r.generation), type: r.type, value: Number(r.value || 0) }))
+  const byGeneration = new Map(res.rows.map((r) => [Number(r.generation), { generation: Number(r.generation), type: r.type, value: Number(r.value || 0) }]))
+  return Array.from({ length: max }, (_, i) => {
+    const generation = i + 1
+    return byGeneration.get(generation) || { generation, type: 'percent', value: 0 }
+  })
 }
 
 export async function allocateCommission(client, { fromAgentId, baseAmount, sourceType, sourceId, maxLevels, kind, ownerAdminId = null }) {
@@ -296,8 +298,6 @@ export async function adjustRewardBySuperAdmin({ adminId, agentId, amount, note 
 
 export async function runAnnualRenewalCheckOnce(actorAdminId = 'system') {
   return tx(async (client) => {
-    const feeRes = await client.query("SELECT value FROM system_settings WHERE key='annualFeeAmount'")
-    const fee = roundMoney(feeRes.rows[0]?.value || 365)
     const due = await client.query(
       `SELECT * FROM sales_advisers
        WHERE status <> 'PENDING_FEE' AND (annual_fee_expires_at IS NULL OR annual_fee_expires_at <= NOW())
@@ -305,6 +305,11 @@ export async function runAnnualRenewalCheckOnce(actorAdminId = 'system') {
     )
     const rows = []
     for (const agent of due.rows) {
+      const fee = roundMoney(await getAdminAnnualFeeAmount(agent.owner_admin_id || 'admin_super', client))
+      if (fee <= 0) {
+        rows.push({ agentId: agent.id, status: 'ANNUAL_FEE_NOT_SET' })
+        continue
+      }
       await lockAgentBalance(client, agent.id)
       const balance = await getAgentBalance(agent.id, client)
       if (balance >= fee) {

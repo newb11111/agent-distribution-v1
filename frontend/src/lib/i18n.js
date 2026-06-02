@@ -209,7 +209,8 @@ export const dict = {
     removeQrImage: '删除二维码图片',
     qrImageTooLarge: '二维码图片太大，请使用小于 1.5 兆的图片。',
     qrImageUploadFailed: '二维码图片上传失败。',
-    adminContactSettingsHint: '这些联系方式和付款资料会根据销售顾问所属管理员独立显示。',
+    adminContactSettingsHint: '每个管理员的年费、分佣、联系方式和付款资料都是独立的；没有保存资料时不会自动使用总部资料。'
+    ,editAdminSettingsFor: '正在设置的管理员',
     linkCopied: '注册链接已复制。',
     orderDeductRewardHint: '下单会直接从销售顾问的奖励余额扣款，不需要再提交付款证明。',
     orderTotal: '订单总额',
@@ -504,7 +505,8 @@ export const dict = {
     removeQrImage: 'Remove QR Image',
     qrImageTooLarge: 'QR image is too large. Please use an image under 1.5MB.',
     qrImageUploadFailed: 'QR image upload failed.',
-    adminContactSettingsHint: 'These WhatsApp / payment details are shown separately based on each Sales Adviser’s owner Admin.',
+    adminContactSettingsHint: 'Annual fee, commission, WhatsApp and payment details are independent for each Admin. Empty Admin settings will not inherit HQ settings.'
+    ,editAdminSettingsFor: 'Editing settings for',
     linkCopied: 'Registration link copied.',
     orderDeductRewardHint: 'Orders are paid directly from the Sales Adviser Reward balance. No payment proof is required.',
     orderTotal: 'Order Total',
@@ -799,7 +801,8 @@ export const dict = {
     removeQrImage: 'Buang Imej QR',
     qrImageTooLarge: 'Imej QR terlalu besar. Sila guna imej bawah 1.5MB.',
     qrImageUploadFailed: 'Upload imej QR gagal.',
-    adminContactSettingsHint: 'Butiran WhatsApp / bayaran ini dipaparkan secara berasingan mengikut owner Admin Sales Adviser.',
+    adminContactSettingsHint: 'Yuran tahunan, komisen, WhatsApp dan butiran bayaran adalah berasingan untuk setiap Admin. Tetapan kosong tidak akan mewarisi tetapan HQ.'
+    ,editAdminSettingsFor: 'Ubah tetapan untuk',
     linkCopied: 'Pautan pendaftaran telah disalin.',
     orderDeductRewardHint: 'Pesanan akan dibayar terus daripada baki Reward Sales Adviser. Bukti bayaran tidak diperlukan.',
     orderTotal: 'Jumlah Pesanan',
