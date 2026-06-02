@@ -191,6 +191,48 @@ function CenterNotice({ open, title, message, type = 'info', onClose, children }
 }
 
 
+function buildQuery(params = {}) {
+  const qs = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return
+    qs.set(key, String(value))
+  })
+  const text = qs.toString()
+  return text ? `?${text}` : ''
+}
+
+function pageOf(payload = {}) {
+  return payload?.pagination || { page: 1, limit: 50, total: 0, totalPages: 1 }
+}
+
+function PaginationControls({ t, pagination, onPage }) {
+  const meta = pageOf({ pagination })
+  if (!meta || Number(meta.total || 0) <= Number(meta.limit || 50)) {
+    return <div className="pagination muted">{t('showing')} {Number(meta.total || 0)} / {Number(meta.total || 0)}</div>
+  }
+  const page = Number(meta.page || 1)
+  const totalPages = Number(meta.totalPages || 1)
+  return (
+    <div className="pagination">
+      <span>{t('page')} {page} / {totalPages} · {t('total')} {meta.total}</span>
+      <div className="row gap">
+        <Button variant="secondary" disabled={page <= 1} onClick={() => onPage(page - 1)}>{t('previous')}</Button>
+        <Button variant="secondary" disabled={page >= totalPages} onClick={() => onPage(page + 1)}>{t('next')}</Button>
+      </div>
+    </div>
+  )
+}
+
+function SearchBar({ t, value, onChange, onSearch }) {
+  return (
+    <div className="list-search">
+      <input placeholder={t('search')} value={value} onChange={(e) => onChange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') onSearch?.() }} />
+      <Button variant="secondary" onClick={onSearch}>{t('search')}</Button>
+    </div>
+  )
+}
+
+
 function MobileTabs({ t, tabs, tab, setTab }) {
   const pickTab = (x) => (event) => {
     event?.preventDefault?.()
@@ -405,37 +447,52 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
   const baseTabs = ['dashboard', 'adminUsers', 'agents', 'products', 'paymentProofs', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
   const tabs = baseTabs.filter((x) => x === 'adminUsers' ? isSuper : hasAdminPermission(admin, x))
   const [tab, setTab] = useState(tabs[0] || 'dashboard')
-  const [data, setData] = useState(null)
+  const [data, setData] = useState({})
+  const [loading, setLoading] = useState({})
   const [error, setError] = useState('')
 
-  async function safeLoad(payload, key, path) {
-    if (!hasAdminPermission(admin, key)) return
-    payload[key === 'paymentProofs' ? 'proofs' : key] = await api(path, {}, 'admin')
+  function adminPathFor(key, params = {}) {
+    const query = buildQuery(params)
+    const map = {
+      dashboard: '/api/admin/dashboard',
+      adminUsers: '/api/admin/admin-users',
+      agents: '/api/admin/agents',
+      products: '/api/admin/products',
+      paymentProofs: '/api/admin/payment-proofs',
+      commissionRules: '/api/admin/commission-rules',
+      reward: '/api/admin/wallet-ledger',
+      withdrawals: '/api/admin/withdrawals',
+      orders: '/api/admin/orders',
+      reports: '/api/admin/reports/summary'
+    }
+    return `${map[key] || map.dashboard}${query}`
   }
 
-  async function load() {
+  async function loadTab(key = tab, params = {}, force = false) {
+    if (!key) return
+    if (key === 'adminUsers' && !isSuper) return
+    if (key !== 'adminUsers' && !hasAdminPermission(admin, key)) return
+    if (data[key] && !force && !Object.keys(params).length) return
     setError('')
+    setLoading((x) => ({ ...x, [key]: true }))
     try {
-      const payload = {}
-      await safeLoad(payload, 'dashboard', '/api/admin/dashboard')
-      await safeLoad(payload, 'agents', '/api/admin/agents')
-      await safeLoad(payload, 'products', '/api/admin/products')
-      await safeLoad(payload, 'paymentProofs', '/api/admin/payment-proofs')
-      await safeLoad(payload, 'withdrawals', '/api/admin/withdrawals')
-      await safeLoad(payload, 'orders', '/api/admin/orders')
-      await safeLoad(payload, 'reports', '/api/admin/reports/summary')
-      if (hasAdminPermission(admin, 'commissionRules')) payload.rules = await api('/api/admin/commission-rules', {}, 'admin')
-      if (hasAdminPermission(admin, 'reward')) payload.reward = await api('/api/admin/wallet-ledger', {}, 'admin')
-      if (isSuper) payload.adminUsers = await api('/api/admin/admin-users', {}, 'admin')
-      setData(payload)
+      const payload = await api(adminPathFor(key, params), {}, 'admin')
+      setData((x) => ({ ...x, [key]: payload }))
     } catch (err) {
       setError(err.message)
       if (err.message === 'UNAUTHORIZED') onLogout()
+    } finally {
+      setLoading((x) => ({ ...x, [key]: false }))
     }
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { loadTab('dashboard') }, [])
+  useEffect(() => { loadTab(tab) }, [tab])
   useEffect(() => { if (!tabs.includes(tab)) setTab(tabs[0] || 'dashboard') }, [admin?.permissions?.join(','), admin?.role])
+
+  const refreshActive = () => loadTab(tab, {}, true)
+  const currentData = data[tab]
+  const isLoading = Boolean(loading[tab])
 
   return (
     <Layout
@@ -444,26 +501,26 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
       t={t}
       title={isSuper ? t('superAdminHq') : t('LEADER')}
       subtitle={isSuper ? t('superAdminIntro') : t('subAdminIntro')}
-      right={<><Button variant="secondary" onClick={load}>{t('refresh')}</Button><Button variant="danger" onClick={onLogout}>{t('logout')}</Button></>}
+      right={<><Button variant="secondary" onClick={refreshActive}>{t('refresh')}</Button><Button variant="danger" onClick={onLogout}>{t('logout')}</Button></>}
       navTabs={tabs}
       activeTab={tab}
       onTabChange={setTab}
     >
       <ErrorBox error={error} />
-      <div className="notice">{t('currentRole')}: <strong>{t(admin?.role || 'LEADER')}</strong></div>
+      <div className="notice">{t('currentRole')}: <strong>{t(admin?.role || 'LEADER')}</strong> · {t('lazyLoadHint')}</div>
       <MobileTabs t={t} tabs={tabs} tab={tab} setTab={setTab} />
-      {!data ? <Card>{t('loading')}...</Card> : (
+      {isLoading && !currentData ? <Card>{t('loading')}...</Card> : (
         <>
-          {tab === 'dashboard' && data.dashboard && <AdminHome t={t} data={data.dashboard} isSuper={isSuper || hasAdminPermission(admin, 'reward')} />}
-          {tab === 'adminUsers' && isSuper && data.adminUsers && <AdminUsers t={t} admins={data.adminUsers.admins} reload={load} />}
-          {tab === 'agents' && data.agents && <AdminAgents t={t} agents={data.agents.agents} ownerOptions={data.agents.ownerOptions || []} admin={admin} reload={load} />}
-          {tab === 'products' && data.products && <AdminProducts t={t} products={data.products.products} reload={load} />}
-          {tab === 'paymentProofs' && data.proofs && <AdminProofs t={t} proofs={data.proofs.proofs} reload={load} />}
-          {tab === 'commissionRules' && data.rules && <AdminRules t={t} rulesData={data.rules} reload={load} isSuper={isSuper} />}
-          {tab === 'reward' && data.reward && <AdminWallet t={t} wallet={data.reward} />}
-          {tab === 'withdrawals' && data.withdrawals && <AdminWithdrawals t={t} withdrawals={data.withdrawals.withdrawals} reload={load} />}
-          {tab === 'orders' && data.orders && <AdminOrders t={t} orders={data.orders.orders} />}
-          {tab === 'reports' && data.reports && <AdminReports t={t} summary={data.reports} />}
+          {tab === 'dashboard' && currentData && <AdminHome t={t} data={currentData} isSuper={isSuper || hasAdminPermission(admin, 'reward')} />}
+          {tab === 'adminUsers' && isSuper && currentData && <AdminUsers t={t} admins={currentData.admins || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('adminUsers', params, true)} />}
+          {tab === 'agents' && currentData && <AdminAgents t={t} agents={currentData.agents || []} pagination={currentData.pagination} ownerOptions={currentData.ownerOptions || []} admin={admin} reload={(params = {}) => loadTab('agents', params, true)} />}
+          {tab === 'products' && currentData && <AdminProducts t={t} products={currentData.products || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('products', params, true)} />}
+          {tab === 'paymentProofs' && currentData && <AdminProofs t={t} proofs={currentData.proofs || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('paymentProofs', params, true)} />}
+          {tab === 'commissionRules' && currentData && <AdminRules t={t} rulesData={currentData} reload={(params = {}) => loadTab('commissionRules', params, true)} isSuper={isSuper} />}
+          {tab === 'reward' && currentData && <AdminWallet t={t} wallet={currentData} pagination={currentData.pagination} reload={(params = {}) => loadTab('reward', params, true)} />}
+          {tab === 'withdrawals' && currentData && <AdminWithdrawals t={t} withdrawals={currentData.withdrawals || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('withdrawals', params, true)} />}
+          {tab === 'orders' && currentData && <AdminOrders t={t} orders={currentData.orders || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('orders', params, true)} />}
+          {tab === 'reports' && currentData && <AdminReports t={t} summary={currentData} />}
         </>
       )}
     </Layout>
@@ -489,7 +546,9 @@ function PermissionChecklist({ t, value, onChange, disabled = false }) {
   )
 }
 
-function AdminUsers({ t, admins, reload }) {
+function AdminUsers({ t, admins, pagination, reload }) {
+  const [search, setSearch] = useState('')
+  const runSearch = (page = 1) => reload({ search, page })
   const [form, setForm] = useState({ code: '', password: '', name: '', role: 'LEADER', permissions: DEFAULT_LEADER_PERMISSIONS })
   const [permissionModal, setPermissionModal] = useState(null)
   const [error, setError] = useState('')
@@ -505,13 +564,13 @@ function AdminUsers({ t, admins, reload }) {
       await api('/api/admin/admin-users', { method: 'POST', body: form }, 'admin')
       setForm({ code: '', password: '', name: '', role: 'LEADER', permissions: DEFAULT_LEADER_PERMISSIONS })
       setMessage(t('saved'))
-      reload()
+      reload({ search, page: 1 })
     } catch (err) { setError(err.message) }
   }
 
   async function setStatus(id, status) {
     await api(`/api/admin/admin-users/${id}/status`, { method: 'PATCH', body: { status } }, 'admin')
-    reload()
+    reload({ search, page: pageOf({ pagination }).page })
   }
 
   async function savePermissions() {
@@ -519,7 +578,7 @@ function AdminUsers({ t, admins, reload }) {
     await api(`/api/admin/admin-users/${permissionModal.admin.id}/permissions`, { method: 'PATCH', body: { permissions: permissionModal.permissions || [] } }, 'admin')
     setMessage(t('saved'))
     setPermissionModal(null)
-    reload()
+    reload({ search, page: pageOf({ pagination }).page })
   }
 
   function permissionText(a) {
@@ -549,7 +608,7 @@ function AdminUsers({ t, admins, reload }) {
         <Button onClick={create}>{t('save')}</Button>
       </Card>
       <Card>
-        <h3>{t('adminUsers')}</h3>
+        <div className="section-head"><h3>{t('adminUsers')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
         <Table><thead><tr><th>{t('adminCode')}</th><th>{t('name')}</th><th>{t('role')}</th><th>{t('ownerScope')}</th><th>{t('permissions')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead><tbody>{admins.map((a) => {
           const actions = [
             { label: t('permissions'), variant: 'secondary', onClick: () => openPermissions(a), hidden: a.role !== 'LEADER' },
@@ -557,6 +616,7 @@ function AdminUsers({ t, admins, reload }) {
           ]
           return <tr key={a.id}><td>{a.code}</td><td>{a.name}</td><td>{t(a.role)}</td><td>{a.role === 'SUPER_ADMIN' ? t('hqOwner') : (a.scopeOwnerAdminId === 'ALL' ? t('allPermissions') : a.name)}</td><td><span className="permission-summary">{permissionText(a)}</span></td><td><StatusBadge t={t} status={a.status} /></td><td><ActionMenu t={t} actions={actions} /></td></tr>
         })}</tbody></Table>
+        <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
       </Card>
       {permissionModal && (
         <div className="drawer-backdrop action-backdrop" onClick={() => setPermissionModal(null)}>
@@ -631,7 +691,7 @@ function AdminHome({ t, data, isSuper }) {
   )
 }
 
-function AdminAgents({ t, agents, ownerOptions = [], admin, reload }) {
+function AdminAgents({ t, agents, pagination, ownerOptions = [], admin, reload }) {
   const [search, setSearch] = useState('')
   const [form, setForm] = useState({ email: '', name: '', sponsorCode: '', ownerAdminId: ownerOptions[0]?.id || 'admin_super' })
   const [error, setError] = useState('')
@@ -639,7 +699,8 @@ function AdminAgents({ t, agents, ownerOptions = [], admin, reload }) {
   const [creditModal, setCreditModal] = useState(null)
   const [creditForm, setCreditForm] = useState({ amount: '', note: '' })
   const [creditError, setCreditError] = useState('')
-  const rows = agents.filter((a) => [a.name, a.email, a.agentCode, a.status, a.ownerName].join(' ').toLowerCase().includes(search.toLowerCase()))
+  const rows = agents
+  const runSearch = (page = 1) => reload({ search, page })
   const isSuper = admin?.role === 'SUPER_ADMIN'
 
   async function createSalesAdviser() {
@@ -648,13 +709,13 @@ function AdminAgents({ t, agents, ownerOptions = [], admin, reload }) {
       await api('/api/admin/agents', { method: 'POST', body: form }, 'admin')
       setForm({ email: '', name: '', sponsorCode: '', ownerAdminId: ownerOptions[0]?.id || 'admin_super' })
       setMessage(t('saved'))
-      reload()
+      reload({ search, page: 1 })
     } catch (err) { setError(err.message) }
   }
 
   async function setStatus(id, status) {
     await api(`/api/admin/agents/${id}/status`, { method: 'PATCH', body: { status } }, 'admin')
-    reload()
+    reload({ search, page: pageOf({ pagination }).page })
   }
 
   function openCreditModal(agent) {
@@ -675,7 +736,7 @@ function AdminAgents({ t, agents, ownerOptions = [], admin, reload }) {
       setCreditModal(null)
       setCreditForm({ amount: '', note: '' })
       setMessage(t('rewardAdjustSuccess'))
-      reload()
+      reload({ search, page: pageOf({ pagination }).page })
     } catch (err) {
       setCreditError(t(err.message) || err.message)
     }
@@ -696,18 +757,19 @@ function AdminAgents({ t, agents, ownerOptions = [], admin, reload }) {
         <Button onClick={createSalesAdviser}>{t('save')}</Button>
       </Card>
       <Card>
-        <div className="section-head"><h3>{t('agents')}</h3><input placeholder={t('search')} value={search} onChange={(e) => setSearch(e.target.value)} /></div>
+        <div className="section-head"><h3>{t('agents')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
         <Table>
           <thead><tr><th>{t('agentCode')}</th><th>{t('name')}</th><th>{t('email')}</th><th>{t('owner')}</th><th>{t('sponsor')}</th><th>{t('balance')}</th><th>{t('annualFeeReminder')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead>
           <tbody>
-            {rows.map((a) => (
+            {rows.length ? rows.map((a) => (
               <tr key={a.id}>
                 <td>{a.agentCode}</td><td>{a.name}</td><td>{a.email}</td><td>{a.ownerName || '-'}</td><td>{a.sponsor?.agentCode || '-'}</td><td>{money(a.balance)}</td><td>{a.annualFeeDaysLeft} {t('days')}</td><td><StatusBadge t={t} status={a.status} /></td>
                 <td><ActionMenu t={t} actions={[{ label: t('addRewardCredit'), onClick: () => openCreditModal(a), hidden: !isSuper }, { label: t('active'), onClick: () => setStatus(a.id, 'ACTIVE') }, { label: t('frozen'), onClick: () => setStatus(a.id, 'FROZEN') }]} /></td>
               </tr>
-            ))}
+            )) : <tr><td><Empty t={t} /></td></tr>}
           </tbody>
         </Table>
+        <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
       </Card>
 
       <CenterNotice
@@ -732,22 +794,24 @@ function AdminAgents({ t, agents, ownerOptions = [], admin, reload }) {
   )
 }
 
-function AdminProducts({ t, products, reload }) {
+function AdminProducts({ t, products, pagination, reload }) {
   const [form, setForm] = useState({ sku: '', name: '', description: '', price: '', cost: '' })
+  const [search, setSearch] = useState('')
   const [error, setError] = useState('')
+  const runSearch = (page = 1) => reload({ search, page })
 
   async function add() {
     setError('')
     try {
       await api('/api/admin/products', { method: 'POST', body: form }, 'admin')
       setForm({ sku: '', name: '', description: '', price: '', cost: '' })
-      reload()
+      reload({ search, page: 1 })
     } catch (err) { setError(err.message) }
   }
 
   async function toggle(p) {
     await api(`/api/admin/products/${p.id}`, { method: 'PATCH', body: { isActive: !p.isActive } }, 'admin')
-    reload()
+    reload({ search, page: pageOf({ pagination }).page })
   }
 
   return (
@@ -765,23 +829,27 @@ function AdminProducts({ t, products, reload }) {
         <Button onClick={add}>{t('save')}</Button>
       </Card>
       <Card>
-        <h3>{t('products')}</h3>
-        <Table><thead><tr><th>{t('sku')}</th><th>{t('productName')}</th><th>{t('price')}</th><th>{t('cost')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead><tbody>{products.map((p) => <tr key={p.id}><td>{p.sku}</td><td>{p.name}</td><td>{money(p.price)}</td><td>{money(p.cost)}</td><td><StatusBadge t={t} status={p.isActive ? 'ACTIVE' : 'HIDDEN'} /></td><td><ActionMenu t={t} actions={[{ label: p.isActive ? t('hidden') : t('active'), onClick: () => toggle(p) }]} /></td></tr>)}</tbody></Table>
+        <div className="section-head"><h3>{t('products')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
+        <Table><thead><tr><th>{t('sku')}</th><th>{t('productName')}</th><th>{t('price')}</th><th>{t('cost')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead><tbody>{products.length ? products.map((p) => <tr key={p.id}><td>{p.sku}</td><td>{p.name}</td><td>{money(p.price)}</td><td>{money(p.cost)}</td><td><StatusBadge t={t} status={p.isActive ? 'ACTIVE' : 'HIDDEN'} /></td><td><ActionMenu t={t} actions={[{ label: p.isActive ? t('hidden') : t('active'), onClick: () => toggle(p) }]} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+        <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
       </Card>
     </>
   )
 }
 
-function AdminProofs({ t, proofs, reload }) {
-  async function approve(id) { await api(`/api/admin/payment-proofs/${id}/approve`, { method: 'POST' }, 'admin'); reload() }
-  async function reject(id) { await api(`/api/admin/payment-proofs/${id}/reject`, { method: 'POST', body: { reason: 'Rejected by admin' } }, 'admin'); reload() }
+function AdminProofs({ t, proofs, pagination, reload }) {
+  const [search, setSearch] = useState('')
+  const runSearch = (page = 1) => reload({ search, page })
+  async function approve(id) { await api(`/api/admin/payment-proofs/${id}/approve`, { method: 'POST' }, 'admin'); reload({ search, page: pageOf({ pagination }).page }) }
+  async function reject(id) { await api(`/api/admin/payment-proofs/${id}/reject`, { method: 'POST', body: { reason: 'Rejected by admin' } }, 'admin'); reload({ search, page: pageOf({ pagination }).page }) }
   return (
     <Card>
-      <h3>{t('paymentProofs')}</h3>
+      <div className="section-head"><h3>{t('paymentProofs')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
       <Table>
         <thead><tr><th>{t('type')}</th><th>{t('submittedBy')}</th><th>{t('amount')}</th><th>{t('proof')}</th><th>{t('status')}</th><th>{t('createdAt')}</th><th>{t('action')}</th></tr></thead>
-        <tbody>{proofs.map((p) => <tr key={p.id}><td>{proofTypeText(t, p.type)}</td><td>{p.agent?.name || '-'}</td><td>{money(p.amount)}</td><td>{p.proofText}</td><td><StatusBadge t={t} status={p.status} /></td><td>{dateText(p.createdAt)}</td><td><ActionMenu t={t} actions={[{ label: t('approve'), onClick: () => approve(p.id), hidden: p.status !== 'PENDING' }, { label: t('reject'), variant: 'danger', onClick: () => reject(p.id), hidden: p.status !== 'PENDING' }]} /></td></tr>)}</tbody>
+        <tbody>{proofs.length ? proofs.map((p) => <tr key={p.id}><td>{proofTypeText(t, p.type)}</td><td>{p.agent?.name || '-'}</td><td>{money(p.amount)}</td><td>{p.proofText}</td><td><StatusBadge t={t} status={p.status} /></td><td>{dateText(p.createdAt)}</td><td><ActionMenu t={t} actions={[{ label: t('approve'), onClick: () => approve(p.id), hidden: p.status !== 'PENDING' }, { label: t('reject'), variant: 'danger', onClick: () => reject(p.id), hidden: p.status !== 'PENDING' }]} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody>
       </Table>
+      <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
     </Card>
   )
 }
@@ -868,31 +936,45 @@ function AdminRules({ t, rulesData, reload, isSuper = false }) {
   )
 }
 
-function AdminWallet({ t, wallet }) {
+function AdminWallet({ t, wallet, pagination, reload }) {
+  const [search, setSearch] = useState('')
+  const runSearch = (page = 1) => reload({ search, page })
+  const rows = Array.isArray(wallet.rows) ? wallet.rows : []
+  const companyRows = Array.isArray(wallet.companyLedger) ? wallet.companyLedger : []
   return (
     <div className="two-col">
-      <Card><h3>{t('rewardLedger')}</h3><Table><tbody>{wallet.rows.slice(0, 80).map((w) => <tr key={w.id}><td>{w.agent?.agentCode}</td><td>{ledgerTypeText(t, w.type)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>)}</tbody></Table></Card>
-      <Card><h3>{t('companyLedger')}</h3><Table><tbody>{wallet.companyLedger.slice(0, 80).map((w) => <tr key={w.id}><td>{sourceTypeText(t, w.sourceType)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>)}</tbody></Table></Card>
+      <Card>
+        <div className="section-head"><h3>{t('rewardLedger')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
+        <Table><tbody>{rows.length ? rows.map((w) => <tr key={w.id}><td>{w.agent?.agentCode}</td><td>{ledgerTypeText(t, w.type)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+        <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
+      </Card>
+      <Card><h3>{t('companyLedger')}</h3><Table><tbody>{companyRows.length ? companyRows.map((w) => <tr key={w.id}><td>{sourceTypeText(t, w.sourceType)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
     </div>
   )
 }
 
-function AdminWithdrawals({ t, withdrawals, reload }) {
-  async function paid(id) { await api(`/api/admin/withdrawals/${id}/mark-paid`, { method: 'POST' }, 'admin'); reload() }
-  async function reject(id) { await api(`/api/admin/withdrawals/${id}/reject`, { method: 'POST', body: { reason: 'Rejected by admin' } }, 'admin'); reload() }
+function AdminWithdrawals({ t, withdrawals, pagination, reload }) {
+  const [search, setSearch] = useState('')
+  const runSearch = (page = 1) => reload({ search, page })
+  async function paid(id) { await api(`/api/admin/withdrawals/${id}/mark-paid`, { method: 'POST' }, 'admin'); reload({ search, page: pageOf({ pagination }).page }) }
+  async function reject(id) { await api(`/api/admin/withdrawals/${id}/reject`, { method: 'POST', body: { reason: 'Rejected by admin' } }, 'admin'); reload({ search, page: pageOf({ pagination }).page }) }
   return (
     <Card>
-      <h3>{t('withdrawals')}</h3>
-      <Table><thead><tr><th>{t('submittedBy')}</th><th>{t('amount')}</th><th>{t('bankName')}</th><th>{t('bankAccountNo')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead><tbody>{withdrawals.map((w) => <tr key={w.id}><td>{w.agent?.name}</td><td>{money(w.amount)}</td><td>{w.bankSnapshot?.bankName}</td><td>{w.bankSnapshot?.bankAccountNo}</td><td><StatusBadge t={t} status={w.status} /></td><td><ActionMenu t={t} actions={[{ label: t('markPaid'), onClick: () => paid(w.id), hidden: w.status !== 'PENDING' }, { label: t('reject'), variant: 'danger', onClick: () => reject(w.id), hidden: w.status !== 'PENDING' }]} /></td></tr>)}</tbody></Table>
+      <div className="section-head"><h3>{t('withdrawals')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
+      <Table><thead><tr><th>{t('submittedBy')}</th><th>{t('amount')}</th><th>{t('bankName')}</th><th>{t('bankAccountNo')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead><tbody>{withdrawals.length ? withdrawals.map((w) => <tr key={w.id}><td>{w.agent?.name}</td><td>{money(w.amount)}</td><td>{w.bankSnapshot?.bankName}</td><td>{w.bankSnapshot?.bankAccountNo}</td><td><StatusBadge t={t} status={w.status} /></td><td><ActionMenu t={t} actions={[{ label: t('markPaid'), onClick: () => paid(w.id), hidden: w.status !== 'PENDING' }, { label: t('reject'), variant: 'danger', onClick: () => reject(w.id), hidden: w.status !== 'PENDING' }]} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+      <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
     </Card>
   )
 }
 
-function AdminOrders({ t, orders }) {
+function AdminOrders({ t, orders, pagination, reload }) {
+  const [search, setSearch] = useState('')
+  const runSearch = (page = 1) => reload({ search, page })
   return (
     <Card>
-      <h3>{t('orders')}</h3>
-      <Table><thead><tr><th>ID</th><th>{t('submittedBy')}</th><th>{t('productName')}</th><th>{t('qty')}</th><th>{t('amount')}</th><th>{t('customerName')}</th><th>{t('customerPhone')}</th><th>{t('deliveryAddress')}</th><th>{t('paymentStatus')}</th><th>{t('fulfillmentStatus')}</th><th>{t('createdAt')}</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.id.slice(-8)}</td><td>{o.agent?.name}</td><td>{o.product?.name}</td><td>{o.qty}</td><td>{money(o.totalAmount)}</td><td>{o.customerName}</td><td>{o.customerPhone}</td><td>{o.deliveryAddress || '-'}</td><td><StatusBadge t={t} status={o.status} /></td><td><StatusBadge t={t} status={o.fulfillmentStatus} /></td><td>{dateText(o.createdAt)}</td></tr>)}</tbody></Table>
+      <div className="section-head"><h3>{t('orders')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
+      <Table><thead><tr><th>ID</th><th>{t('submittedBy')}</th><th>{t('productName')}</th><th>{t('qty')}</th><th>{t('amount')}</th><th>{t('customerName')}</th><th>{t('customerPhone')}</th><th>{t('deliveryAddress')}</th><th>{t('paymentStatus')}</th><th>{t('fulfillmentStatus')}</th><th>{t('createdAt')}</th></tr></thead><tbody>{orders.length ? orders.map((o) => <tr key={o.id}><td>{o.id.slice(-8)}</td><td>{o.agent?.name}</td><td>{o.product?.name}</td><td>{o.qty}</td><td>{money(o.totalAmount)}</td><td>{o.customerName}</td><td>{o.customerPhone}</td><td>{o.deliveryAddress || '-'}</td><td><StatusBadge t={t} status={o.status} /></td><td><StatusBadge t={t} status={o.fulfillmentStatus} /></td><td>{dateText(o.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+      <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
     </Card>
   )
 }
@@ -948,27 +1030,61 @@ function AgentApp({ lang, setLang, t }) {
 function AgentDashboard({ lang, setLang, t, onLogout }) {
   const tabs = ['dashboard', 'profile', 'team', 'products', 'orders', 'reward', 'withdrawals']
   const [tab, setTab] = useState('dashboard')
-  const [data, setData] = useState(null)
+  const [data, setData] = useState({})
+  const [loading, setLoading] = useState({})
   const [error, setError] = useState('')
 
-  async function load() {
+  function agentPathFor(key, params = {}) {
+    const query = buildQuery(params)
+    const map = {
+      me: '/api/agent/me',
+      dashboard: '/api/agent/me',
+      profile: '/api/agent/me',
+      team: '/api/agent/team',
+      products: '/api/agent/products',
+      orders: '/api/agent/orders',
+      reward: '/api/agent/wallet',
+      withdrawals: '/api/agent/wallet'
+    }
+    return `${map[key] || map.dashboard}${query}`
+  }
+
+  async function loadMe(force = false) {
+    if (data.me && !force) return data.me
+    const me = await api(agentPathFor('me'), {}, 'agent')
+    setData((x) => ({ ...x, me }))
+    return me
+  }
+
+  async function loadTab(key = tab, params = {}, force = false) {
+    if (data[key] && !force && !Object.keys(params).length) return
     setError('')
+    setLoading((x) => ({ ...x, [key]: true }))
     try {
-      const [me, team, products, orders, wallet] = await Promise.all([
-        api('/api/agent/me', {}, 'agent'),
-        api('/api/agent/team', {}, 'agent'),
-        api('/api/agent/products', {}, 'agent'),
-        api('/api/agent/orders', {}, 'agent'),
-        api('/api/agent/wallet', {}, 'agent')
-      ])
-      setData({ me, team, products, orders, wallet })
+      const needsMe = ['dashboard', 'profile', 'team', 'products', 'reward', 'withdrawals'].includes(key)
+      const mePayload = needsMe ? await loadMe(force && ['dashboard', 'profile'].includes(key)) : data.me
+      const payload = key === 'dashboard' || key === 'profile'
+        ? mePayload
+        : await api(agentPathFor(key, params), {}, 'agent')
+      setData((x) => {
+        if (key === 'dashboard' || key === 'profile') return { ...x, me: payload, [key]: payload }
+        return { ...x, [key]: payload }
+      })
     } catch (err) {
       setError(err.message)
       if (err.message === 'UNAUTHORIZED') onLogout()
+    } finally {
+      setLoading((x) => ({ ...x, [key]: false }))
     }
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { loadTab('dashboard') }, [])
+  useEffect(() => { loadTab(tab) }, [tab])
+
+  const refreshActive = () => loadTab(tab, {}, true)
+  const currentData = data[tab]
+  const meData = data.me || data.dashboard || data.profile
+  const isLoading = Boolean(loading[tab])
 
   return (
     <Layout
@@ -977,22 +1093,22 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
       t={t}
       title={t('salesAdviser')}
       subtitle={t('agentIntro')}
-      right={<><Button variant="secondary" onClick={load}>{t('refresh')}</Button><Button variant="danger" onClick={onLogout}>{t('logout')}</Button></>}
+      right={<><Button variant="secondary" onClick={refreshActive}>{t('refresh')}</Button><Button variant="danger" onClick={onLogout}>{t('logout')}</Button></>}
       navTabs={tabs}
       activeTab={tab}
       onTabChange={setTab}
     >
       <ErrorBox error={error} />
       <MobileTabs t={t} tabs={tabs} tab={tab} setTab={setTab} />
-      {!data ? <Card>{t('loading')}...</Card> : (
+      {isLoading && !currentData ? <Card>{t('loading')}...</Card> : (
         <>
-          {tab === 'dashboard' && <AgentHome t={t} data={data} reload={load} />}
-          {tab === 'profile' && <AgentProfile t={t} me={data.me.agent} reload={load} />}
-          {tab === 'team' && <AgentTeam t={t} team={data.team} me={data.me.agent} />}
-          {tab === 'products' && <AgentProducts t={t} products={data.products.products} reload={load} agent={data.me.agent} />}
-          {tab === 'orders' && <AgentOrders t={t} orders={data.orders.orders} />}
-          {tab === 'reward' && <AgentReward t={t} wallet={data.wallet} me={data.me.agent} />}
-          {tab === 'withdrawals' && <AgentWithdrawals t={t} wallet={data.wallet} me={data.me.agent} reload={load} />}
+          {tab === 'dashboard' && meData && <AgentHome t={t} data={{ me: meData }} reload={refreshActive} />}
+          {tab === 'profile' && meData && <AgentProfile t={t} me={meData.agent} reload={refreshActive} />}
+          {tab === 'team' && currentData && meData && <AgentTeam t={t} team={currentData} me={meData.agent} />}
+          {tab === 'products' && currentData && meData && <AgentProducts t={t} products={currentData.products || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('products', params, true)} agent={meData.agent} />}
+          {tab === 'orders' && currentData && <AgentOrders t={t} orders={currentData.orders || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('orders', params, true)} />}
+          {tab === 'reward' && currentData && meData && <AgentReward t={t} wallet={currentData} me={meData.agent} reload={(params = {}) => loadTab('reward', params, true)} />}
+          {tab === 'withdrawals' && currentData && meData && <AgentWithdrawals t={t} wallet={currentData} me={meData.agent} reload={(params = {}) => loadTab('withdrawals', params, true)} />}
         </>
       )}
     </Layout>
@@ -1103,20 +1219,27 @@ function AgentTeam({ t, team, me }) {
   )
 }
 
-function AgentProducts({ t, products, reload, agent }) {
+function AgentProducts({ t, products, pagination, reload, agent }) {
   const [selected, setSelected] = useState(products[0]?.id || '')
+  const [search, setSearch] = useState('')
   const [form, setForm] = useState({ qty: 1, customerName: '', customerPhone: '', deliveryAddress: '', remark: '' })
   const [notice, setNotice] = useState(null)
-  const selectedProduct = products.find((p) => p.id === selected)
+  const selectedProduct = products.find((p) => p.id === selected) || products[0]
   const totalAmount = Number(selectedProduct?.price || 0) * Number(form.qty || 0)
+  const runSearch = (page = 1) => reload({ search, page })
+
+  useEffect(() => {
+    if (!selected && products[0]?.id) setSelected(products[0].id)
+    if (selected && products.length && !products.some((p) => p.id === selected)) setSelected(products[0].id)
+  }, [products.map((p) => p.id).join(','), selected])
 
   async function submit() {
     setNotice(null)
     try {
-      await api('/api/agent/orders', { method: 'POST', body: { ...form, productId: selected } }, 'agent')
+      await api('/api/agent/orders', { method: 'POST', body: { ...form, productId: selectedProduct?.id || selected } }, 'agent')
       setForm({ qty: 1, customerName: '', customerPhone: '', deliveryAddress: '', remark: '' })
       setNotice({ title: t('orderPaidSuccessTitle'), message: t('orderPaidSuccessMessage'), type: 'success' })
-      reload()
+      reload({ search, page: pageOf({ pagination }).page })
     } catch (err) {
       if (err.message === 'INSUFFICIENT_REWARD_CREDIT' || err.message === 'INSUFFICIENT_REWARD') {
         const required = err.data?.required ?? totalAmount
@@ -1143,7 +1266,7 @@ function AgentProducts({ t, products, reload, agent }) {
           <span>{t('orderTotal')}: {money(totalAmount)}</span>
         </div>
         <div className="form-grid">
-          <Field label={t('chooseProduct')}><select value={selected} onChange={(e) => setSelected(e.target.value)}>{products.map((p) => <option key={p.id} value={p.id}>{p.name} - {money(p.price)}</option>)}</select></Field>
+          <Field label={t('chooseProduct')}><select value={selectedProduct?.id || ''} onChange={(e) => setSelected(e.target.value)}>{products.map((p) => <option key={p.id} value={p.id}>{p.name} - {money(p.price)}</option>)}</select></Field>
           <Field label={t('qty')}><input type="number" min="1" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} /></Field>
           <Field label={t('customerName')}><input value={form.customerName} onChange={(e) => setForm({ ...form, customerName: e.target.value })} /></Field>
           <Field label={t('customerPhone')}><input value={form.customerPhone} onChange={(e) => setForm({ ...form, customerPhone: e.target.value })} /></Field>
@@ -1152,31 +1275,52 @@ function AgentProducts({ t, products, reload, agent }) {
         </div>
         <Button onClick={submit}>{t('payWithRewardAndSubmit')}</Button>
       </Card>
-      <Card><h3>{t('productList')}</h3><Table><tbody>{products.map((p) => <tr key={p.id}><td>{p.sku}</td><td>{p.name}</td><td>{p.description}</td><td>{money(p.price)}</td></tr>)}</tbody></Table></Card>
+      <Card>
+        <div className="section-head"><h3>{t('productList')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
+        <Table><tbody>{products.length ? products.map((p) => <tr key={p.id}><td>{p.sku}</td><td>{p.name}</td><td>{p.description}</td><td>{money(p.price)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+        <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
+      </Card>
     </>
   )
 }
 
-function AgentOrders({ t, orders }) {
-  return <Card><h3>{t('myOrders')}</h3><Table><thead><tr><th>{t('productName')}</th><th>{t('qty')}</th><th>{t('amount')}</th><th>{t('customerName')}</th><th>{t('customerPhone')}</th><th>{t('deliveryAddress')}</th><th>{t('paymentStatus')}</th><th>{t('fulfillmentStatus')}</th><th>{t('createdAt')}</th></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td>{o.product?.name}</td><td>{o.qty}</td><td>{money(o.totalAmount)}</td><td>{o.customerName}</td><td>{o.customerPhone}</td><td>{o.deliveryAddress || '-'}</td><td><StatusBadge t={t} status={o.status} /></td><td><StatusBadge t={t} status={o.fulfillmentStatus} /></td><td>{dateText(o.createdAt)}</td></tr>)}</tbody></Table></Card>
+function AgentOrders({ t, orders, pagination, reload }) {
+  const [search, setSearch] = useState('')
+  const runSearch = (page = 1) => reload({ search, page })
+  return (
+    <Card>
+      <div className="section-head"><h3>{t('myOrders')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
+      <Table><thead><tr><th>{t('productName')}</th><th>{t('qty')}</th><th>{t('amount')}</th><th>{t('customerName')}</th><th>{t('customerPhone')}</th><th>{t('deliveryAddress')}</th><th>{t('paymentStatus')}</th><th>{t('fulfillmentStatus')}</th><th>{t('createdAt')}</th></tr></thead><tbody>{orders.length ? orders.map((o) => <tr key={o.id}><td>{o.product?.name}</td><td>{o.qty}</td><td>{money(o.totalAmount)}</td><td>{o.customerName}</td><td>{o.customerPhone}</td><td>{o.deliveryAddress || '-'}</td><td><StatusBadge t={t} status={o.status} /></td><td><StatusBadge t={t} status={o.fulfillmentStatus} /></td><td>{dateText(o.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+      <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
+    </Card>
+  )
 }
 
-function AgentReward({ t, wallet, me }) {
+function AgentReward({ t, wallet = {}, me = {}, reload }) {
+  const [search, setSearch] = useState('')
+  const runSearch = (page = 1) => reload({ search, page })
+  const ledger = Array.isArray(wallet.ledger)
+    ? wallet.ledger
+    : Array.isArray(wallet.rows)
+      ? wallet.rows
+      : []
+  const commissions = Array.isArray(wallet.commissions) ? wallet.commissions : []
+
   return (
     <>
       <div className="stats-grid">
-        <StatCard label={t('rewardCredit')} value={money(wallet.balance)} hint={t('creditEqualRm')} />
-        <StatCard label={t('annualFeeReminder')} value={`${me.annualFeeDaysLeft} ${t('days')}`} />
+        <StatCard label={t('rewardCredit')} value={money(wallet.balance || 0)} hint={t('creditEqualRm')} />
+        <StatCard label={t('annualFeeReminder')} value={`${me.annualFeeDaysLeft ?? 0} ${t('days')}`} />
       </div>
       <div className="two-col">
-        <Card><h3>{t('rewardLedger')}</h3><Table><tbody>{wallet.ledger.length ? wallet.ledger.map((w) => <tr key={w.id}><td>{ledgerTypeText(t, w.type)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
-        <Card><h3>{t('commissionHistory')}</h3><Table><tbody>{wallet.commissions.length ? wallet.commissions.map((c) => <tr key={c.id}><td>L{c.generation}</td><td>{sourceTypeText(t, c.sourceType)}</td><td>{money(c.amount)}</td><td><StatusBadge t={t} status={c.status} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
+        <Card><div className="section-head"><h3>{t('rewardLedger')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div><Table><tbody>{ledger.length ? ledger.map((w) => <tr key={w.id}><td>{ledgerTypeText(t, w.type)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table><PaginationControls t={t} pagination={wallet.pagination} onPage={runSearch} /></Card>
+        <Card><h3>{t('commissionHistory')}</h3><Table><tbody>{commissions.length ? commissions.map((c) => <tr key={c.id}><td>L{c.generation}</td><td>{sourceTypeText(t, c.sourceType)}</td><td>{money(c.amount)}</td><td><StatusBadge t={t} status={c.status} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
       </div>
     </>
   )
 }
 
-function AgentWithdrawals({ t, wallet, me, reload }) {
+function AgentWithdrawals({ t, wallet = {}, me = {}, reload }) {
   const [amount, setAmount] = useState('')
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
@@ -1192,15 +1336,15 @@ function AgentWithdrawals({ t, wallet, me, reload }) {
   return (
     <>
       <div className="stats-grid">
-        <StatCard label={t('rewardCredit')} value={money(wallet.balance)} hint={t('creditEqualRm')} />
-        <StatCard label={t('annualFeeReminder')} value={`${me.annualFeeDaysLeft} ${t('days')}`} />
+        <StatCard label={t('rewardCredit')} value={money(wallet.balance || 0)} hint={t('creditEqualRm')} />
+        <StatCard label={t('annualFeeReminder')} value={`${me.annualFeeDaysLeft ?? 0} ${t('days')}`} />
       </div>
       <Card>
         <h3>{t('requestWithdrawal')}</h3>
         <ErrorBox error={error} />{message && <div className="success-box">{message}</div>}
         <div className="row gap align-end withdrawal-form"><Field label={t('amount')}><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field><Button onClick={withdraw}>{t('requestWithdrawal')}</Button></div>
       </Card>
-      <Card><h3>{t('withdrawals')}</h3><Table><tbody>{wallet.withdrawals.length ? wallet.withdrawals.map((w) => <tr key={w.id}><td>{money(w.amount)}</td><td><StatusBadge t={t} status={w.status} /></td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
+      <Card><h3>{t('withdrawals')}</h3><Table><tbody>{(Array.isArray(wallet.withdrawals) ? wallet.withdrawals : []).length ? (Array.isArray(wallet.withdrawals) ? wallet.withdrawals : []).map((w) => <tr key={w.id}><td>{money(w.amount)}</td><td><StatusBadge t={t} status={w.status} /></td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
     </>
   )
 }

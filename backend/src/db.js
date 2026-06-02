@@ -266,6 +266,13 @@ export async function initDatabase() {
   await query(`ALTER TABLE commission_rules DROP CONSTRAINT IF EXISTS commission_rules_kind_generation_key`)
 
   await query(`CREATE INDEX IF NOT EXISTS idx_sales_advisers_owner ON sales_advisers(owner_admin_id)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_sales_advisers_owner_created ON sales_advisers(owner_admin_id, created_at DESC)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_sales_advisers_status_created ON sales_advisers(status, created_at DESC)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at DESC)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_payment_proofs_agent_created ON payment_proofs(agent_id, created_at DESC)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_orders_agent_created ON orders(agent_id, created_at DESC)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_reward_ledger_agent_created ON reward_ledger(agent_id, created_at DESC)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_withdrawals_agent_created ON withdrawals(agent_id, created_at DESC)`)
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_commission_rules_owner_kind_generation ON commission_rules(owner_admin_id, kind, generation)`)
 
   await seedDefaultData()

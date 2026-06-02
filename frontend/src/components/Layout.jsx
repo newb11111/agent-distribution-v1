@@ -12,7 +12,7 @@ export default function Layout({ children, lang, setLang, t, title, subtitle, ri
       <header className="topbar">
         <div className="topbar-title">
           <a className="brand-logo" href="/" aria-label="Nusantara">
-            <img src="/logo.png" alt="Nusantara" />
+            <img src="/nusantara-logo.svg" alt="Nusantara" />
           </a>
         </div>
         <div className="top-actions">
