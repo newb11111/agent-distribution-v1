@@ -1,7 +1,0 @@
-v1-5-14 self commission + TAC 600s
-
-- Product commission editor now has 11 rows: Self + 10 upline levels.
-- Annual fee commission editor now has 6 rows: Self + 5 upline levels.
-- Successful reward orders can credit self commission to the ordering Sales Adviser, based on each Admin's own rule.
-- Annual fee commission also supports self rule if Admin sets it.
-- TAC resend cooldown changed from 60 seconds to 600 seconds on frontend and backend.

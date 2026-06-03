@@ -522,7 +522,7 @@ app.get('/api/admin/agents', requireAdmin, requireOfficeAdmin, requireAdminPermi
          WHERE status='POSTED'
          GROUP BY agent_id
        ) b ON b.agent_id=a.id
-       WHERE ${scoped.sql} ${ownerSql} ${searchSql}
+       WHERE ${scoped.sql} ${searchSql}
        ORDER BY a.created_at DESC
        LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
       params
@@ -716,7 +716,7 @@ app.get('/api/admin/payment-proofs', requireAdmin, requireOfficeAdmin, requireAd
       `SELECT p.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
        FROM payment_proofs p
        JOIN sales_advisers a ON a.id=p.agent_id
-       WHERE ${scoped.sql} ${ownerSql} ${searchSql}
+       WHERE ${scoped.sql} ${searchSql}
        ORDER BY p.created_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
@@ -774,7 +774,7 @@ app.get('/api/admin/orders', requireAdmin, requireOfficeAdmin, requireAdminPermi
        FROM orders o
        JOIN sales_advisers a ON a.id=o.agent_id
        JOIN products p ON p.id=o.product_id
-       WHERE ${scoped.sql} ${ownerSql} ${searchSql}
+       WHERE ${scoped.sql} ${searchSql}
        ORDER BY o.created_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
@@ -800,7 +800,7 @@ app.get('/api/admin/wallet-ledger', requireAdmin, requireOfficeAdmin, requireAdm
         `SELECT w.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
          FROM reward_ledger w
          JOIN sales_advisers a ON a.id=w.agent_id
-         WHERE ${scoped.sql} ${ownerSql} ${searchSql}
+         WHERE ${scoped.sql} ${searchSql}
          ORDER BY w.created_at DESC
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
         params
@@ -830,7 +830,7 @@ app.get('/api/admin/withdrawals', requireAdmin, requireOfficeAdmin, requireAdmin
       `SELECT w.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
        FROM withdrawals w
        JOIN sales_advisers a ON a.id=w.agent_id
-       WHERE ${scoped.sql} ${ownerSql} ${searchSql}
+       WHERE ${scoped.sql} ${searchSql}
        ORDER BY w.created_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params

@@ -497,7 +497,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
   const isSuper = admin?.role === 'SUPER_ADMIN'
   const baseTabs = ['dashboard', 'adminUsers', 'agents', 'products', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
   const tabs = baseTabs.filter((x) => x === 'adminUsers' ? isSuper : hasAdminPermission(admin, x))
-  const [tab, setTab] = useState(tabs[0] || 'dashboard')
+  const [tab, setTab] = useState(tabs[0] || '')
   const [data, setData] = useState({})
   const dataRef = useRef({})
   const inflightRef = useRef({})
@@ -571,8 +571,22 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
     return request
   }
 
-  useEffect(() => { loadTab(tab) }, [tab])
-  useEffect(() => { if (!tabs.includes(tab)) setTab(tabs[0] || 'dashboard') }, [admin?.permissions?.join(','), admin?.role])
+  useEffect(() => { if (tab) loadTab(tab) }, [tab])
+  useEffect(() => { if (!tabs.includes(tab)) setTab(tabs[0] || '') }, [admin?.permissions?.join(','), admin?.role])
+
+  if (!tabs.length) {
+    return (
+      <Layout
+        lang={lang}
+        setLang={setLang}
+        t={t}
+        title={isSuper ? t('superAdminHq') : t('LEADER')}
+        right={<Button variant="danger" onClick={onLogout}>{t('logout')}</Button>}
+      >
+        <Card>{t('noAdminPermission')}</Card>
+      </Layout>
+    )
+  }
 
   const refreshActive = () => loadTab(tab, {}, true)
   const currentData = data[tab]
