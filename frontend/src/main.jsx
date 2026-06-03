@@ -607,15 +607,15 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
       <MobileTabs t={t} tabs={tabs} tab={tab} setTab={setTab} />
       {isLoading && !currentData ? <Card>{t('loading')}...</Card> : (
         <>
-          {tab === 'dashboard' && currentData && <AdminHome t={t} data={currentData} isSuper={isSuper || hasAdminPermission(admin, 'reward')} />}
+          {tab === 'dashboard' && currentData && <AdminHome t={t} data={currentData} isSuper={isSuper} />}
           {tab === 'adminUsers' && isSuper && currentData && <AdminUsers t={t} admins={currentData.admins || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('adminUsers', params, true)} />}
           {tab === 'agents' && currentData && <AdminAgents t={t} agents={currentData.agents || []} pagination={currentData.pagination} ownerOptions={currentData.ownerOptions || []} admin={admin} reload={(params = {}) => loadTab('agents', params, true)} />}
           {tab === 'products' && currentData && <AdminProducts t={t} products={currentData.products || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('products', params, true)} />}
           {tab === 'commissionRules' && currentData && <AdminRules t={t} rulesData={currentData} reload={(params = {}) => loadTab('commissionRules', params, true)} isSuper={isSuper} />}
-          {tab === 'reward' && currentData && <AdminWallet t={t} wallet={currentData} pagination={currentData.pagination} reload={(params = {}) => loadTab('reward', params, true)} />}
+          {tab === 'reward' && currentData && <AdminWallet t={t} wallet={currentData} pagination={currentData.pagination} reload={(params = {}) => loadTab('reward', params, true)} isSuper={isSuper} />}
           {tab === 'withdrawals' && currentData && <AdminWithdrawals t={t} withdrawals={currentData.withdrawals || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('withdrawals', params, true)} />}
           {tab === 'orders' && currentData && <AdminOrders t={t} orders={currentData.orders || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('orders', params, true)} />}
-          {tab === 'reports' && currentData && <AdminReports t={t} summary={currentData} />}
+          {tab === 'reports' && currentData && <AdminReports t={t} summary={currentData} isSuper={isSuper} />}
         </>
       )}
     </Layout>
@@ -1084,7 +1084,7 @@ function AdminRules({ t, rulesData, reload, isSuper = false }) {
   )
 }
 
-function AdminWallet({ t, wallet, pagination, reload }) {
+function AdminWallet({ t, wallet, pagination, reload, isSuper = false }) {
   const [search, setSearch] = useState('')
   const runSearch = (page = 1) => reload({ search, page })
   const rows = Array.isArray(wallet.rows) ? wallet.rows : []
@@ -1096,7 +1096,7 @@ function AdminWallet({ t, wallet, pagination, reload }) {
         <Table><tbody>{rows.length ? rows.map((w) => <tr key={w.id}><td>{w.agent?.agentCode}</td><td>{ledgerTypeText(t, w.type)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
         <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
       </Card>
-      <Card><h3>{t('companyLedger')}</h3><Table><tbody>{companyRows.length ? companyRows.map((w) => <tr key={w.id}><td>{sourceTypeText(t, w.sourceType)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
+      {isSuper && <Card><h3>{t('companyLedger')}</h3><Table><tbody>{companyRows.length ? companyRows.map((w) => <tr key={w.id}><td>{sourceTypeText(t, w.sourceType)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>}
     </div>
   )
 }
@@ -1141,7 +1141,7 @@ function AdminOrders({ t, orders, pagination, reload }) {
   )
 }
 
-function AdminReports({ t, summary }) {
+function AdminReports({ t, summary, isSuper = false }) {
   const [error, setError] = useState('')
   async function download(type) {
     setError('')
@@ -1162,7 +1162,7 @@ function AdminReports({ t, summary }) {
         <StatCard label={t('approvedOrders')} value={s.approvedOrders || 0} />
         <StatCard label={t('totalCommission')} value={money(s.totalCommission)} />
         <StatCard label={t('totalWithdrawalsPaid')} value={money(s.totalWithdrawalsPaid)} />
-        <StatCard label={t('companyIncome')} value={money(s.totalCompanyIncome)} />
+        {isSuper && <StatCard label={t('companyIncome')} value={money(s.totalCompanyIncome)} />}
         <StatCard label={t('totalSalesAdvisers')} value={s.totalSalesAdvisers || 0} />
         <StatCard label={t('activeSalesAdvisers')} value={s.activeSalesAdvisers || 0} />
       </div>

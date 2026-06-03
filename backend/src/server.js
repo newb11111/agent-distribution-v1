@@ -522,7 +522,7 @@ app.get('/api/admin/agents', requireAdmin, requireOfficeAdmin, requireAdminPermi
          WHERE status='POSTED'
          GROUP BY agent_id
        ) b ON b.agent_id=a.id
-       WHERE ${scoped.sql} ${searchSql}
+       WHERE ${scoped.sql} ${ownerSql} ${searchSql}
        ORDER BY a.created_at DESC
        LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
       params
