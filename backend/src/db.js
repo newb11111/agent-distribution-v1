@@ -46,8 +46,8 @@ export function normalizeAdminPermissions(role, permissions = []) {
   if (role === 'SUPER_ADMIN') return [...ADMIN_PERMISSION_KEYS]
   if (role === 'FULFILLMENT') return ['fulfillmentOrders']
   const allowed = new Set(LEADER_PERMISSION_KEYS)
-  const list = Array.isArray(permissions) && permissions.length ? permissions : DEFAULT_LEADER_PERMISSIONS
-  return [...new Set([...list.filter((p) => allowed.has(p)), ...DEFAULT_LEADER_PERMISSIONS])]
+  const list = Array.isArray(permissions) ? permissions : []
+  return [...new Set(list.filter((p) => allowed.has(p)))]
 }
 
 export async function query(text, params = []) {

@@ -311,7 +311,6 @@ const REPORT_TYPES = ['orders', 'commissions', 'rewardLedger', 'withdrawals', 's
 function hasAdminPermission(admin, key) {
   if (admin?.role === 'SUPER_ADMIN') return true
   if (admin?.role === 'LEADER' && !ADMIN_PERMISSION_KEYS.includes(key)) return false
-  if (admin?.role === 'LEADER' && DEFAULT_LEADER_PERMISSIONS.includes(key)) return true
   return Array.isArray(admin?.permissions) && admin.permissions.includes(key)
 }
 
@@ -453,11 +452,41 @@ function Register({ lang, setLang, t }) {
 
 function AdminApp({ lang, setLang, t }) {
   const [logged, setLogged] = useState(Boolean(localStorage.getItem('admin_token')))
+  const [checking, setChecking] = useState(Boolean(localStorage.getItem('admin_token')))
   const [admin, setAdmin] = useState(() => {
     try { return JSON.parse(localStorage.getItem('admin_profile') || '{}') } catch { return {} }
   })
+
+  const logout = () => {
+    clearToken('admin')
+    localStorage.removeItem('admin_profile')
+    setAdmin({})
+    setLogged(false)
+    setChecking(false)
+  }
+
+  useEffect(() => {
+    if (!logged) {
+      setChecking(false)
+      return undefined
+    }
+    let alive = true
+    setChecking(true)
+    api('/api/admin/me', {}, 'admin')
+      .then((data) => {
+        if (!alive) return
+        const profile = data.admin || {}
+        setAdmin(profile)
+        localStorage.setItem('admin_profile', JSON.stringify(profile))
+      })
+      .catch(() => { if (alive) logout() })
+      .finally(() => { if (alive) setChecking(false) })
+    return () => { alive = false }
+  }, [logged])
+
   if (!logged) return <AdminLogin lang={lang} setLang={setLang} t={t} onLogin={(profile) => { setAdmin(profile || {}); setLogged(true) }} />
-  return <AdminDashboard lang={lang} setLang={setLang} t={t} admin={admin} onLogout={() => { clearToken('admin'); localStorage.removeItem('admin_profile'); setLogged(false) }} />
+  if (checking) return <Layout lang={lang} setLang={setLang} t={t}><Card>{t('loading')}...</Card></Layout>
+  return <AdminDashboard lang={lang} setLang={setLang} t={t} admin={admin} onLogout={logout} />
 }
 
 function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
