@@ -1185,7 +1185,11 @@ app.use((err, req, res, next) => {
     : ['AGENT_NOT_FOUND', 'PRODUCT_NOT_FOUND', 'PROOF_NOT_FOUND', 'ORDER_NOT_FOUND', 'WITHDRAWAL_NOT_FOUND'].includes(message) ? 404
     : 400
   console.error(message, err.details || '')
-  res.status(status).json({ error: message, ...(err.details ? { details: err.details } : {}) })
+  res.status(status).json({
+    error: message,
+    ...(err.retryAfterSeconds ? { retryAfterSeconds: err.retryAfterSeconds } : {}),
+    ...(err.details ? { details: err.details } : {})
+  })
 })
 
 async function start() {

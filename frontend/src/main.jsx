@@ -116,20 +116,51 @@ function ErrorBox({ error }) {
 
 const TAC_COOLDOWN_SECONDS = 600
 
-function useTacCooldown(seconds = TAC_COOLDOWN_SECONDS) {
-  const [left, setLeft] = useState(0)
-  useEffect(() => {
-    if (left <= 0) return undefined
-    const timer = window.setInterval(() => {
-      setLeft((value) => value <= 1 ? 0 : value - 1)
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [left])
-  return [left, () => setLeft(seconds)]
+function tacCooldownKey(value) {
+  const email = String(value || '').trim().toLowerCase()
+  return email ? `tac_cooldown_until:${email}` : ''
 }
 
-function TacSendControl({ t, onSend, disabled = false }) {
-  const [left, startCooldown] = useTacCooldown()
+function getTacCooldownLeft(key) {
+  if (!key) return 0
+  const until = Number(localStorage.getItem(key) || 0)
+  if (!until) return 0
+  const left = Math.ceil((until - Date.now()) / 1000)
+  if (left <= 0) {
+    localStorage.removeItem(key)
+    return 0
+  }
+  return left
+}
+
+function useTacCooldown(identifier, seconds = TAC_COOLDOWN_SECONDS) {
+  const key = tacCooldownKey(identifier)
+  const [left, setLeft] = useState(() => getTacCooldownLeft(key))
+
+  useEffect(() => {
+    setLeft(getTacCooldownLeft(key))
+  }, [key])
+
+  useEffect(() => {
+    if (!key || left <= 0) return undefined
+    const timer = window.setInterval(() => {
+      setLeft(getTacCooldownLeft(key))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [key, left])
+
+  function startCooldown(customSeconds = seconds) {
+    if (!key) return
+    const duration = Math.max(1, Number(customSeconds || seconds))
+    localStorage.setItem(key, String(Date.now() + duration * 1000))
+    setLeft(duration)
+  }
+
+  return [left, startCooldown]
+}
+
+function TacSendControl({ t, onSend, disabled = false, cooldownKey = '' }) {
+  const [left, startCooldown] = useTacCooldown(cooldownKey)
   const [sending, setSending] = useState(false)
   const locked = disabled || sending || left > 0
 
@@ -137,8 +168,10 @@ function TacSendControl({ t, onSend, disabled = false }) {
     if (locked) return
     setSending(true)
     try {
-      const ok = await onSend?.()
-      if (ok !== false) startCooldown()
+      const result = await onSend?.()
+      if (typeof result === 'number') startCooldown(result)
+      else if (result && typeof result.cooldownSeconds === 'number') startCooldown(result.cooldownSeconds)
+      else if (result !== false) startCooldown()
     } finally {
       setSending(false)
     }
@@ -147,9 +180,9 @@ function TacSendControl({ t, onSend, disabled = false }) {
   return (
     <div className="tac-send-wrap">
       <Button variant={left > 0 ? 'cooldown' : 'secondary'} onClick={handleSend} disabled={locked}>
-        {sending ? `${t('sendTac')}...` : t('sendTac')}
+        {left > 0 ? `${left}s` : (sending ? `${t('sendTac')}...` : t('sendTac'))}
       </Button>
-      {left > 0 && <span className="tac-countdown">{left}s</span>}
+      {left > 0 && <span className="tac-countdown">{t('pleaseWait') || 'Please wait'}</span>}
     </div>
   )
 }
@@ -375,6 +408,9 @@ function TacLogin({ t, mode, onSuccess }) {
       return true
     } catch (err) {
       setError(err.message)
+      if (err.message === 'TAC_TOO_FREQUENT') {
+        return { cooldownSeconds: err.data?.retryAfterSeconds || err.data?.details?.retryAfterSeconds || TAC_COOLDOWN_SECONDS }
+      }
       return false
     }
   }
@@ -396,7 +432,7 @@ function TacLogin({ t, mode, onSuccess }) {
       <Field label={t('email')}><input value={email} onChange={(e) => setEmail(e.target.value)} /></Field>
       <div className="row gap align-end">
         <Field label={t('tac')}><input value={tac} onChange={(e) => setTac(e.target.value)} /></Field>
-        <TacSendControl t={t} onSend={sendTac} disabled={!email} />
+        <TacSendControl t={t} onSend={sendTac} disabled={!email} cooldownKey={email} />
       </div>
       <Button onClick={login}>{t('login')}</Button>
     </Card>
@@ -415,6 +451,9 @@ function Register({ lang, setLang, t }) {
       return true
     } catch (err) {
       setError(err.message)
+      if (err.message === 'TAC_TOO_FREQUENT') {
+        return { cooldownSeconds: err.data?.retryAfterSeconds || err.data?.details?.retryAfterSeconds || TAC_COOLDOWN_SECONDS }
+      }
       return false
     }
   }
@@ -440,7 +479,7 @@ function Register({ lang, setLang, t }) {
         <Field label={t('email')}><input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
         <div className="row gap align-end">
           <Field label={t('tac')}><input value={form.tac} onChange={(e) => setForm({ ...form, tac: e.target.value })} /></Field>
-          <TacSendControl t={t} onSend={sendTac} disabled={!form.email} />
+          <TacSendControl t={t} onSend={sendTac} disabled={!form.email} cooldownKey={form.email} />
         </div>
           <Field label={t('name')}><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
         <Field label={t('sponsorCode')}><input value={form.sponsorCode} onChange={(e) => setForm({ ...form, sponsorCode: e.target.value.toUpperCase() })} placeholder={t('sponsorPlaceholder')} /></Field>

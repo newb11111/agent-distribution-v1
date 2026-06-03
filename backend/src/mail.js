@@ -20,20 +20,28 @@ export async function createOtp(email, purpose = 'LOGIN_REGISTER') {
   const clean = normalizeEmail(email)
   if (!clean || !clean.includes('@')) throw new Error('INVALID_EMAIL')
 
+  const cooldownSeconds = Number(process.env.TAC_COOLDOWN_SECONDS || 600)
   const recent = await query(
-    `SELECT created_at FROM otp_codes WHERE email=$1 AND created_at > NOW() - INTERVAL '600 seconds' ORDER BY created_at DESC LIMIT 1`,
-    [clean]
+    `SELECT created_at FROM otp_codes WHERE email=$1 AND created_at > NOW() - ($2 || ' seconds')::interval ORDER BY created_at DESC LIMIT 1`,
+    [clean, String(cooldownSeconds)]
   )
-  if (recent.rowCount) throw new Error('TAC_TOO_FREQUENT')
+  if (recent.rowCount) {
+    const elapsed = Math.floor((Date.now() - new Date(recent.rows[0].created_at).getTime()) / 1000)
+    const retryAfterSeconds = Math.max(1, cooldownSeconds - elapsed)
+    const err = new Error('TAC_TOO_FREQUENT')
+    err.retryAfterSeconds = retryAfterSeconds
+    err.details = { retryAfterSeconds }
+    throw err
+  }
 
   const tac = makeTac()
   const expiresMinutes = Number(process.env.OTP_EXPIRES_MINUTES || 10)
+  await sendTacEmail(clean, tac, expiresMinutes)
   await query(
     `INSERT INTO otp_codes (id, email, tac_hash, purpose, expires_at)
      VALUES ($1,$2,$3,$4,NOW() + ($5 || ' minutes')::interval)`,
     [uid('otp'), clean, hashTac(clean, tac), purpose, String(expiresMinutes)]
   )
-  await sendTacEmail(clean, tac, expiresMinutes)
   return { email: clean, devTac: process.env.NODE_ENV === 'production' ? undefined : tac }
 }
 
