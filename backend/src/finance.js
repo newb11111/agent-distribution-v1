@@ -97,7 +97,7 @@ async function creditCompany(client, { amount, sourceType, sourceId, note }) {
 
 export async function getRules(client, kind, ownerAdminId = 'admin_super') {
   const owner = ownerAdminId || 'admin_super'
-  const max = kind === 'annualFee' ? 5 : 10
+  const maxUplineLevels = kind === 'annualFee' ? 5 : 10
   const res = await client.query(
     `SELECT generation, type, value
      FROM commission_rules
@@ -106,10 +106,8 @@ export async function getRules(client, kind, ownerAdminId = 'admin_super') {
     [kind, owner]
   )
   const byGeneration = new Map(res.rows.map((r) => [Number(r.generation), { generation: Number(r.generation), type: r.type, value: Number(r.value || 0) }]))
-  return Array.from({ length: max }, (_, i) => {
-    const generation = i + 1
-    return byGeneration.get(generation) || { generation, type: 'percent', value: 0 }
-  })
+  const generations = [0, ...Array.from({ length: maxUplineLevels }, (_, i) => i + 1)]
+  return generations.map((generation) => byGeneration.get(generation) || { generation, type: 'percent', value: 0 })
 }
 
 export async function allocateCommission(client, { fromAgentId, baseAmount, sourceType, sourceId, maxLevels, kind, ownerAdminId = null }) {
@@ -124,13 +122,42 @@ export async function allocateCommission(client, { fromAgentId, baseAmount, sour
   }
 
   const cleanBaseAmount = Math.max(0, roundMoney(Number(baseAmount || 0)))
-  const ownerRes = ownerAdminId ? null : await client.query('SELECT owner_admin_id FROM sales_advisers WHERE id=$1', [fromAgentId])
-  const ruleOwnerAdminId = ownerAdminId || ownerRes?.rows[0]?.owner_admin_id || 'admin_super'
+  const fromAgentRes = await client.query('SELECT * FROM sales_advisers WHERE id=$1', [fromAgentId])
+  const fromAgent = fromAgentRes.rows[0]
+  if (!fromAgent) throw new Error('AGENT_NOT_FOUND')
+  const ruleOwnerAdminId = ownerAdminId || fromAgent.owner_admin_id || 'admin_super'
   const rules = await getRules(client, kind, ruleOwnerAdminId)
   const { chain, skipped } = await getUplineChain(client, fromAgentId, maxLevels, { compressInactive: true })
   let totalPaid = 0
   let totalSkipped = 0
   const rows = []
+
+  const selfRule = rules.find((r) => Number(r.generation) === 0)
+  const selfAmount = Math.min(calculateCommission(cleanBaseAmount, selfRule), cleanBaseAmount)
+  if (selfAmount > 0) {
+    const commissionId = uid('commission')
+    await client.query(
+      `INSERT INTO commission_ledger
+       (id, owner_admin_id, source_type, source_id, from_agent_id, to_agent_id, generation, rule_type, rule_value, base_amount, amount, status, note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [
+        commissionId, ruleOwnerAdminId, cleanSourceType, cleanSourceId, fromAgentId, fromAgentId, 0,
+        selfRule?.type || 'percent', Number(selfRule?.value || 0), cleanBaseAmount, selfAmount,
+        'PAID_TO_AGENT',
+        'Self commission credited to reward'
+      ]
+    )
+    rows.push(commissionId)
+    await creditAgent(client, {
+      agentId: fromAgentId,
+      amount: selfAmount,
+      sourceType: cleanSourceType,
+      sourceId: cleanSourceId,
+      type: cleanSourceType === 'PRODUCT_ORDER' ? 'PRODUCT_COMMISSION_IN' : 'ANNUAL_FEE_COMMISSION_IN',
+      note: `${cleanSourceType} self commission`
+    })
+    totalPaid = roundMoney(totalPaid + selfAmount)
+  }
 
   for (const item of skipped) {
     const commissionId = uid('commission')

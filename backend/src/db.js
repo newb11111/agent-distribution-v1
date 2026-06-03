@@ -303,9 +303,9 @@ async function clearCopiedHqDefaultsForLeaders() {
 
     const sameRules = await query(
       `WITH owner_rules AS (
-         SELECT kind, generation, type, value::numeric FROM commission_rules WHERE owner_admin_id=$1
+         SELECT kind, generation, type, value::numeric FROM commission_rules WHERE owner_admin_id=$1 AND generation > 0
        ), hq_rules AS (
-         SELECT kind, generation, type, value::numeric FROM commission_rules WHERE owner_admin_id='admin_super'
+         SELECT kind, generation, type, value::numeric FROM commission_rules WHERE owner_admin_id='admin_super' AND generation > 0
        ), diff AS (
          (SELECT * FROM owner_rules EXCEPT SELECT * FROM hq_rules)
          UNION ALL
@@ -370,6 +370,12 @@ async function seedDefaultData() {
     )
   }
 
+  await query(
+    `INSERT INTO commission_rules (id, owner_admin_id, kind, generation, type, value)
+     VALUES ($1,'admin_super','product',0,'percent',0)
+     ON CONFLICT (owner_admin_id, kind, generation) DO NOTHING`,
+    [uid('rule')]
+  )
   for (let i = 1; i <= 10; i += 1) {
     await query(
       `INSERT INTO commission_rules (id, owner_admin_id, kind, generation, type, value)
@@ -378,6 +384,12 @@ async function seedDefaultData() {
       [uid('rule'), i, i === 1 ? 10 : i === 2 ? 5 : i === 3 ? 3 : 0]
     )
   }
+  await query(
+    `INSERT INTO commission_rules (id, owner_admin_id, kind, generation, type, value)
+     VALUES ($1,'admin_super','annualFee',0,'percent',0)
+     ON CONFLICT (owner_admin_id, kind, generation) DO NOTHING`,
+    [uid('rule')]
+  )
   for (let i = 1; i <= 5; i += 1) {
     await query(
       `INSERT INTO commission_rules (id, owner_admin_id, kind, generation, type, value)

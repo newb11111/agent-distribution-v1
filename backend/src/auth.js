@@ -2,7 +2,7 @@ import jwt from 'jsonwebtoken'
 import { query, jsonValue, normalizeAdminPermissions } from './db.js'
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-before-production'
-const TOKEN_EXPIRES_IN = process.env.TOKEN_EXPIRES_IN || '12h'
+const TOKEN_EXPIRES_IN = process.env.TOKEN_EXPIRES_IN || '30d'
 
 export function signAdminToken(admin) {
   return jwt.sign({ type: 'admin', id: admin.id, role: admin.role }, JWT_SECRET, { expiresIn: TOKEN_EXPIRES_IN })

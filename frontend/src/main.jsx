@@ -83,15 +83,19 @@ function translatedCode(t, prefix, value) {
 function sourceTypeText(t, value) { return translatedCode(t, 'source', value) }
 function ledgerTypeText(t, value) { return translatedCode(t, 'ledger', value) }
 function proofTypeText(t, value) { return translatedCode(t, 'type', value) }
+function generationText(t, value) { return Number(value) === 0 ? t('selfCommission') : `${t('level')} ${value}` }
 function noteText(t, value) {
   const raw = String(value || '').trim()
   if (!raw) return '-'
   const compressedLedger = raw.match(/^(PRODUCT_ORDER|ANNUAL_FEE_[A-Z_]+) commission level (\d+) \(compressed from level (\d+)\)$/i)
   if (compressedLedger) return `${t('note_CommissionCompressed')} · ${t('level')} ${compressedLedger[2]} ← ${t('level')} ${compressedLedger[3]}`
+  if (/^PRODUCT_ORDER self commission/i.test(raw)) return t('note_SelfCommissionCredited')
   if (/^PRODUCT_ORDER commission level /i.test(raw)) return `${t('note_CommissionCredited')} · ${t('level')} ${raw.split(' ').pop()}`
+  if (/^ANNUAL_FEE_/i.test(raw) && /self commission/i.test(raw)) return t('note_SelfCommissionCredited')
   if (/^ANNUAL_FEE_/i.test(raw) && /commission level /i.test(raw)) return `${t('note_CommissionCredited')} · ${t('level')} ${raw.split(' ').pop()}`
   const compressedCommission = raw.match(/^Commission credited to reward; compressed from level (\d+) to level (\d+)$/i)
   if (compressedCommission) return `${t('note_CommissionCompressed')} · ${t('level')} ${compressedCommission[2]} ← ${t('level')} ${compressedCommission[1]}`
+  if (raw === 'Self commission credited to reward') return t('note_SelfCommissionCredited')
   if (raw === 'Sales Adviser inactive/expired; commission compressed to active upline') return t('note_SkippedCompressed')
   if (/^Forfeited commission from level /i.test(raw)) return `${t('note_ForfeitedCommission')} · ${t('level')} ${raw.split(' ').pop()}`
   if (raw === 'Company net after paid and forfeited commissions' || raw === 'Company net after paid commissions') return t('note_CompanyNet')
@@ -110,7 +114,7 @@ function ErrorBox({ error }) {
   return <div className="error-box">{error}</div>
 }
 
-const TAC_COOLDOWN_SECONDS = 60
+const TAC_COOLDOWN_SECONDS = 600
 
 function useTacCooldown(seconds = TAC_COOLDOWN_SECONDS) {
   const [left, setLeft] = useState(0)
@@ -612,7 +616,7 @@ function AdminUsers({ t, admins, pagination, reload }) {
       await api('/api/admin/admin-users', { method: 'POST', body: form }, 'admin')
       setForm({ code: '', password: '', name: '', role: 'LEADER', permissions: DEFAULT_LEADER_PERMISSIONS })
       showSuccess(setNotice, t, 'saved')
-      reload({ search, page: 1 })
+      runSearch(1)
     } catch (err) { showError(setNotice, t, err) }
   }
 
@@ -650,7 +654,7 @@ function AdminUsers({ t, admins, pagination, reload }) {
       setPasswordModal(null)
       setNewPassword('')
       showSuccess(setNotice, t, 'passwordUpdated')
-      reload({ search, page: pageOf({ pagination }).page })
+      runSearch(pageOf({ pagination }).page)
     } catch (err) { showError(setNotice, t, err) }
   }
 
@@ -670,13 +674,13 @@ function AdminUsers({ t, admins, pagination, reload }) {
       </Card>
       <Card>
         <div className="section-head"><h3>{t('adminUsers')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
-        <Table><thead><tr><th>{t('adminCode')}</th><th>{t('name')}</th><th>{t('role')}</th><th>{t('ownerScope')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead><tbody>{admins.map((a) => {
+        <Table><thead><tr><th>{t('adminCode')}</th><th>{t('name')}</th><th>{t('role')}</th><th>{t('ownerScope')}</th><th>{t('downlineCount')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead><tbody>{admins.map((a) => {
           const actions = [
             { label: t('permissions'), variant: 'secondary', onClick: () => openPermissions(a), hidden: a.role !== 'LEADER' },
             { label: t('changePassword'), variant: 'secondary', onClick: () => openPassword(a), hidden: a.role === 'SUPER_ADMIN' },
             { label: a.status === 'ACTIVE' ? t('hidden') : t('active'), onClick: () => setStatus(a.id, a.status === 'ACTIVE' ? 'HIDDEN' : 'ACTIVE'), hidden: a.role === 'SUPER_ADMIN' }
           ]
-          return <tr key={a.id}><td>{a.code}</td><td>{a.name}</td><td>{t(a.role)}</td><td>{a.role === 'SUPER_ADMIN' ? t('hqOwner') : (a.scopeOwnerAdminId === 'ALL' ? t('allPermissions') : a.name)}</td><td><StatusBadge t={t} status={a.status} /></td><td><ActionMenu t={t} actions={actions} /></td></tr>
+          return <tr key={a.id}><td>{a.code}</td><td>{a.name}</td><td>{t(a.role)}</td><td>{a.role === 'SUPER_ADMIN' ? t('hqOwner') : (a.scopeOwnerAdminId === 'ALL' ? t('allPermissions') : a.name)}</td><td>{a.downlineCount ?? 0}</td><td><StatusBadge t={t} status={a.status} /></td><td><ActionMenu t={t} actions={actions} /></td></tr>
         })}</tbody></Table>
         <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
       </Card>
@@ -773,28 +777,31 @@ function AdminHome({ t, data, isSuper }) {
       </div>
       {isSuper && <Card>
         <h3>{t('commissionHistory')}</h3>
-        <Table><tbody>{data.recentCommissions.length ? data.recentCommissions.map((r) => <tr key={r.id}><td>{t('level')} {r.generation}</td><td>{sourceTypeText(t, r.sourceType)}</td><td>{money(r.amount)}</td><td><StatusBadge t={t} status={r.status} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+        <Table><tbody>{data.recentCommissions.length ? data.recentCommissions.map((r) => <tr key={r.id}><td>{generationText(t, r.generation)}</td><td>{sourceTypeText(t, r.sourceType)}</td><td>{money(r.amount)}</td><td><StatusBadge t={t} status={r.status} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
       </Card>}
     </>
   )
 }
 
 function AdminAgents({ t, agents, pagination, ownerOptions = [], admin, reload }) {
+  const isSuper = admin?.role === 'SUPER_ADMIN'
+  const ownerCreateOptions = ownerOptions.filter((o) => o.id !== 'ALL')
+  const defaultOwnerId = ownerCreateOptions[0]?.id || 'admin_super'
   const [search, setSearch] = useState('')
-  const [form, setForm] = useState({ email: '', name: '', sponsorCode: '', ownerAdminId: ownerOptions[0]?.id || 'admin_super' })
+  const [form, setForm] = useState({ email: '', name: '', sponsorCode: '', ownerAdminId: defaultOwnerId })
   const [notice, setNotice] = useState(null)
+  const [ownerFilter, setOwnerFilter] = useState('ALL')
   const [creditModal, setCreditModal] = useState(null)
   const [creditForm, setCreditForm] = useState({ amount: '', note: '' })
   const rows = agents
-  const runSearch = (page = 1) => reload({ search, page })
-  const isSuper = admin?.role === 'SUPER_ADMIN'
+  const runSearch = (page = 1, nextOwner = ownerFilter) => reload({ search, page, ownerAdminId: isSuper ? nextOwner : undefined })
 
   async function createSalesAdviser() {
     try {
       await api('/api/admin/agents', { method: 'POST', body: form }, 'admin')
-      setForm({ email: '', name: '', sponsorCode: '', ownerAdminId: ownerOptions[0]?.id || 'admin_super' })
+      setForm({ email: '', name: '', sponsorCode: '', ownerAdminId: defaultOwnerId })
       showSuccess(setNotice, t, 'saved')
-      reload({ search, page: 1 })
+      runSearch(1)
     } catch (err) { showError(setNotice, t, err) }
   }
 
@@ -802,7 +809,7 @@ function AdminAgents({ t, agents, pagination, ownerOptions = [], admin, reload }
     try {
       await api(`/api/admin/agents/${id}/status`, { method: 'PATCH', body: { status } }, 'admin')
       showSuccess(setNotice, t, 'saved')
-      reload({ search, page: pageOf({ pagination }).page })
+      runSearch(pageOf({ pagination }).page)
     } catch (err) { showError(setNotice, t, err) }
   }
 
@@ -821,7 +828,7 @@ function AdminAgents({ t, agents, pagination, ownerOptions = [], admin, reload }
       setCreditModal(null)
       setCreditForm({ amount: '', note: '' })
       showSuccess(setNotice, t, 'rewardAdjustSuccess')
-      reload({ search, page: pageOf({ pagination }).page })
+      runSearch(pageOf({ pagination }).page)
     } catch (err) { showError(setNotice, t, err) }
   }
 
@@ -834,18 +841,18 @@ function AdminAgents({ t, agents, pagination, ownerOptions = [], admin, reload }
           <Field label={t('email')}><input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
           <Field label={t('name')}><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
           <Field label={t('sponsorOptional')}><input value={form.sponsorCode} onChange={(e) => setForm({ ...form, sponsorCode: e.target.value.toUpperCase() })} /></Field>
-          {isSuper && <Field label={t('ownerScope')}><select value={form.ownerAdminId} onChange={(e) => setForm({ ...form, ownerAdminId: e.target.value })}>{ownerOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></Field>}
+          {isSuper && <Field label={t('ownerScope')}><select value={form.ownerAdminId} onChange={(e) => setForm({ ...form, ownerAdminId: e.target.value })}>{ownerCreateOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></Field>}
         </div>
         <Button onClick={createSalesAdviser}>{t('save')}</Button>
       </Card>
       <Card>
-        <div className="section-head"><h3>{t('agents')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
+        <div className="section-head"><h3>{t('agents')}</h3><div className="row gap wrap">{isSuper && <select value={ownerFilter} onChange={(e) => { setOwnerFilter(e.target.value); runSearch(1, e.target.value) }}>{ownerOptions.map((o) => <option key={o.id} value={o.id}>{o.id === 'ALL' ? t('allAdmins') : o.name}</option>)}</select>}<SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div></div>
         <Table>
-          <thead><tr><th>{t('agentCode')}</th><th>{t('name')}</th><th>{t('email')}</th><th>{t('owner')}</th><th>{t('sponsor')}</th><th>{t('balance')}</th><th>{t('annualFeeReminder')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead>
+          <thead><tr><th>{t('agentCode')}</th><th>{t('name')}</th><th>{t('email')}</th><th>{t('phone')}</th><th>{t('owner')}</th><th>{t('sponsor')}</th><th>{t('balance')}</th><th>{t('annualFeeReminder')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead>
           <tbody>
             {rows.length ? rows.map((a) => (
               <tr key={a.id}>
-                <td>{a.agentCode}</td><td>{a.name}</td><td>{a.email}</td><td>{a.ownerName || '-'}</td><td>{a.sponsor?.agentCode || '-'}</td><td>{money(a.balance)}</td><td>{a.annualFeeDaysLeft} {t('days')}</td><td><StatusBadge t={t} status={a.status} /></td>
+                <td>{a.agentCode}</td><td>{a.name}</td><td>{a.email}</td><td>{a.phone || a.profile?.phone || '-'}</td><td>{a.ownerName || '-'}</td><td>{a.sponsor?.agentCode || '-'}</td><td>{money(a.balance)}</td><td>{a.annualFeeDaysLeft} {t('days')}</td><td><StatusBadge t={t} status={a.status} /></td>
                 <td><ActionMenu t={t} actions={[{ label: t('addRewardCredit'), onClick: () => openCreditModal(a), hidden: !isSuper }, { label: t('active'), onClick: () => setStatus(a.id, 'ACTIVE') }, { label: t('frozen'), onClick: () => setStatus(a.id, 'FROZEN') }]} /></td>
               </tr>
             )) : <tr><td><Empty t={t} /></td></tr>}
@@ -1003,7 +1010,7 @@ function AdminRules({ t, rulesData, reload, isSuper = false }) {
   const editor = (title, kind, list) => (
     <div>
       <h4>{title}</h4>
-      <Table><thead><tr><th>{t('generation')}</th><th>{t('type')}</th><th>{t('value')}</th></tr></thead><tbody>{list.map((r, idx) => <tr key={r.generation}><td>{t('level')} {r.generation}</td><td><select value={r.type} onChange={(e) => updateRule(kind, idx, { type: e.target.value })}><option value="percent">{t('percent')}</option><option value="amount">{t('fixedAmount')}</option></select></td><td><input type="number" value={r.value} onChange={(e) => updateRule(kind, idx, { value: e.target.value })} /></td></tr>)}</tbody></Table>
+      <Table><thead><tr><th>{t('generation')}</th><th>{t('type')}</th><th>{t('value')}</th></tr></thead><tbody>{list.map((r, idx) => <tr key={r.generation}><td>{generationText(t, r.generation)}</td><td><select value={r.type} onChange={(e) => updateRule(kind, idx, { type: e.target.value })}><option value="percent">{t('percent')}</option><option value="amount">{t('fixedAmount')}</option></select></td><td><input type="number" value={r.value} onChange={(e) => updateRule(kind, idx, { value: e.target.value })} /></td></tr>)}</tbody></Table>
     </div>
   )
 
@@ -1498,7 +1505,7 @@ function AgentReward({ t, wallet = {}, me = {}, reload }) {
       </div>
       <div className="two-col">
         <Card><div className="section-head"><h3>{t('rewardLedger')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div><Table><tbody>{ledger.length ? ledger.map((w) => <tr key={w.id}><td>{ledgerTypeText(t, w.type)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table><PaginationControls t={t} pagination={wallet.pagination} onPage={runSearch} /></Card>
-        <Card><h3>{t('commissionHistory')}</h3><Table><tbody>{commissions.length ? commissions.map((c) => <tr key={c.id}><td>{t('level')} {c.generation}</td><td>{sourceTypeText(t, c.sourceType)}</td><td>{money(c.amount)}</td><td><StatusBadge t={t} status={c.status} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
+        <Card><h3>{t('commissionHistory')}</h3><Table><tbody>{commissions.length ? commissions.map((c) => <tr key={c.id}><td>{generationText(t, c.generation)}</td><td>{sourceTypeText(t, c.sourceType)}</td><td>{money(c.amount)}</td><td><StatusBadge t={t} status={c.status} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
       </div>
     </>
   )

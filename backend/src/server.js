@@ -296,20 +296,26 @@ app.get('/api/admin/admin-users', requireAdmin, requireSuperAdmin, async (req, r
     let where = ''
     if (search) {
       params.push(`%${search}%`)
-      where = `WHERE LOWER(code) LIKE $1 OR LOWER(name) LIKE $1 OR LOWER(role) LIKE $1 OR LOWER(status) LIKE $1`
+      where = `WHERE LOWER(au.code) LIKE $1 OR LOWER(au.name) LIKE $1 OR LOWER(au.role) LIKE $1 OR LOWER(au.status) LIKE $1`
     }
     params.push(limit, offset)
     const result = await query(
-      `SELECT *, COUNT(*) OVER() AS total_count
-       FROM admin_users
+      `SELECT au.*,
+          CASE
+            WHEN au.id='admin_super' THEN (SELECT COUNT(*)::int FROM sales_advisers sa WHERE sa.owner_admin_id='admin_super')
+            WHEN au.role='LEADER' THEN (SELECT COUNT(*)::int FROM sales_advisers sa WHERE sa.owner_admin_id=au.id)
+            ELSE 0
+          END AS downline_count,
+          COUNT(*) OVER() AS total_count
+       FROM admin_users au
        ${where}
-       ORDER BY created_at ASC
+       ORDER BY au.created_at ASC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     )
     const total = result.rows[0]?.total_count || 0
     const admins = result.rows.map(toAdmin)
-    res.json({ admins: admins.map((a) => ({ ...a, passwordHash: undefined })), pagination: paginationMeta(total, page, limit) })
+    res.json({ admins: admins.map((a, idx) => ({ ...a, downlineCount: Number(result.rows[idx]?.downline_count || 0), passwordHash: undefined })), pagination: paginationMeta(total, page, limit) })
   } catch (err) { next(err) }
 })
 
@@ -484,11 +490,17 @@ app.get('/api/admin/agents', requireAdmin, requireOfficeAdmin, requireAdminPermi
     const { page, limit, offset, search } = pageParams(req, 50, 100)
     const scoped = scopedAgentsWhere(req.admin, 'a')
     const params = [...scoped.params]
+    let ownerSql = ''
+    const requestedOwner = cleanText(req.query.ownerAdminId)
+    if (req.admin.role === 'SUPER_ADMIN' && requestedOwner && requestedOwner !== 'ALL') {
+      params.push(requestedOwner)
+      ownerSql = `AND a.owner_admin_id = $${params.length}`
+    }
     let searchSql = ''
     if (search) {
       params.push(`%${search}%`)
       const i = params.length
-      searchSql = `AND (LOWER(a.agent_code) LIKE $${i} OR LOWER(a.referral_code) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.email) LIKE $${i} OR LOWER(a.status) LIKE $${i} OR LOWER(COALESCE(au.name,'')) LIKE $${i} OR LOWER(COALESCE(s.agent_code,'')) LIKE $${i})`
+      searchSql = `AND (LOWER(a.agent_code) LIKE $${i} OR LOWER(a.referral_code) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.email) LIKE $${i} OR LOWER(a.status) LIKE $${i} OR LOWER(COALESCE(a.profile->>'phone','')) LIKE $${i} OR LOWER(COALESCE(au.name,'')) LIKE $${i} OR LOWER(COALESCE(s.agent_code,'')) LIKE $${i})`
     }
     params.push(limit, offset)
     const limitIndex = params.length - 1
@@ -510,7 +522,7 @@ app.get('/api/admin/agents', requireAdmin, requireOfficeAdmin, requireAdminPermi
          WHERE status='POSTED'
          GROUP BY agent_id
        ) b ON b.agent_id=a.id
-       WHERE ${scoped.sql} ${searchSql}
+       WHERE ${scoped.sql} ${ownerSql} ${searchSql}
        ORDER BY a.created_at DESC
        LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
       params
@@ -519,10 +531,11 @@ app.get('/api/admin/agents', requireAdmin, requireOfficeAdmin, requireAdminPermi
     const agents = result.rows.map((row) => toAgent(row, {
       balance: Number(row.balance || 0),
       annualFeeDaysLeft: daysLeft(row.annual_fee_expires_at),
+      phone: jsonValue(row.profile, {}).phone || '',
       ownerName: row.owner_name,
       sponsor: row.sponsor_agent_id ? { id: row.sponsor_agent_id, agentCode: row.sponsor_agent_code, name: row.sponsor_name } : null
     }))
-    res.json({ agents, ownerOptions: await ownerOptions(), pagination: paginationMeta(total, page, limit) })
+    res.json({ agents, ownerOptions: [{ id: 'ALL', name: 'All Admins' }, ...(await ownerOptions())], pagination: paginationMeta(total, page, limit) })
   } catch (err) { next(err) }
 })
 
@@ -656,7 +669,7 @@ app.put('/api/admin/commission-rules', requireAdmin, requireOfficeAdmin, require
         const list = Array.isArray(req.body[kind]) ? req.body[kind] : []
         for (const r of list) {
           const generation = Number(r.generation)
-          if (!generation) continue
+          if (!Number.isFinite(generation) || generation < 0) continue
           const type = r.type === 'amount' ? 'amount' : 'percent'
           const value = Math.max(0, num(r.value))
           await client.query(
@@ -703,7 +716,7 @@ app.get('/api/admin/payment-proofs', requireAdmin, requireOfficeAdmin, requireAd
       `SELECT p.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
        FROM payment_proofs p
        JOIN sales_advisers a ON a.id=p.agent_id
-       WHERE ${scoped.sql} ${searchSql}
+       WHERE ${scoped.sql} ${ownerSql} ${searchSql}
        ORDER BY p.created_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
@@ -761,7 +774,7 @@ app.get('/api/admin/orders', requireAdmin, requireOfficeAdmin, requireAdminPermi
        FROM orders o
        JOIN sales_advisers a ON a.id=o.agent_id
        JOIN products p ON p.id=o.product_id
-       WHERE ${scoped.sql} ${searchSql}
+       WHERE ${scoped.sql} ${ownerSql} ${searchSql}
        ORDER BY o.created_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
@@ -787,7 +800,7 @@ app.get('/api/admin/wallet-ledger', requireAdmin, requireOfficeAdmin, requireAdm
         `SELECT w.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
          FROM reward_ledger w
          JOIN sales_advisers a ON a.id=w.agent_id
-         WHERE ${scoped.sql} ${searchSql}
+         WHERE ${scoped.sql} ${ownerSql} ${searchSql}
          ORDER BY w.created_at DESC
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
         params
@@ -817,7 +830,7 @@ app.get('/api/admin/withdrawals', requireAdmin, requireOfficeAdmin, requireAdmin
       `SELECT w.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
        FROM withdrawals w
        JOIN sales_advisers a ON a.id=w.agent_id
-       WHERE ${scoped.sql} ${searchSql}
+       WHERE ${scoped.sql} ${ownerSql} ${searchSql}
        ORDER BY w.created_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params

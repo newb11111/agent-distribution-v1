@@ -21,7 +21,7 @@ export async function createOtp(email, purpose = 'LOGIN_REGISTER') {
   if (!clean || !clean.includes('@')) throw new Error('INVALID_EMAIL')
 
   const recent = await query(
-    `SELECT created_at FROM otp_codes WHERE email=$1 AND created_at > NOW() - INTERVAL '60 seconds' ORDER BY created_at DESC LIMIT 1`,
+    `SELECT created_at FROM otp_codes WHERE email=$1 AND created_at > NOW() - INTERVAL '600 seconds' ORDER BY created_at DESC LIMIT 1`,
     [clean]
   )
   if (recent.rowCount) throw new Error('TAC_TOO_FREQUENT')
