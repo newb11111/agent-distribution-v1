@@ -1,0 +1,6 @@
+v1-5-16 admin permission visibility persistence fix
+
+- Removed frontend default permission fallback for LEADER admins. If Super Admin unchecks a feature, that tab/button is hidden instead of visible/disabled.
+- Removed backend permission normalization fallback that re-added default permissions after refresh. Saved unchecked permissions now remain unchecked.
+- Kept user favicon/logo paths as /favicon.png and /logo.png.
+- Admin profile is refreshed from /api/admin/me on page load so permission changes take effect after refresh instead of using stale localStorage.
