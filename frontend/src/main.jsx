@@ -771,7 +771,7 @@ function AdminUsers({ t, admins, pagination, reload }) {
             { label: t('changePassword'), variant: 'secondary', onClick: () => openPassword(a), hidden: a.role === 'SUPER_ADMIN' },
             { label: a.status === 'ACTIVE' ? t('hidden') : t('active'), onClick: () => setStatus(a.id, a.status === 'ACTIVE' ? 'HIDDEN' : 'ACTIVE'), hidden: a.role === 'SUPER_ADMIN' }
           ]
-          return <tr key={a.id}><td>{a.code}</td><td>{a.name}</td><td>{t(a.role)}</td><td>{a.role === 'SUPER_ADMIN' ? t('hqOwner') : (a.scopeOwnerAdminId === 'ALL' ? t('allPermissions') : a.name)}</td><td>{a.downlineCount ?? 0}</td><td><StatusBadge t={t} status={a.status} /></td><td><ActionMenu t={t} actions={actions} /></td></tr>
+          return <tr key={a.id}><td>{a.code}</td><td>{a.name}</td><td>{t(a.role)}</td><td>{a.role === 'SUPER_ADMIN' ? t('hqOwner') : ownerNameText(t, a.scopeOwnerAdminId, a.name)}</td><td>{a.downlineCount ?? 0}</td><td><StatusBadge t={t} status={a.status} /></td><td><ActionMenu t={t} actions={actions} /></td></tr>
         })}</tbody></Table>
         <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
       </Card>
