@@ -84,13 +84,13 @@ export async function debitAgent(client, { agentId, amount, sourceType, sourceId
   return id
 }
 
-async function creditCompany(client, { amount, sourceType, sourceId, note }) {
+async function creditCompany(client, { amount, sourceType, sourceId, note, ownerAdminId = 'admin_super', fromAgentId = null }) {
   if (Number(amount) <= 0) return null
   const id = uid('company')
   await client.query(
-    `INSERT INTO company_ledger (id, amount, source_type, source_id, note)
-     VALUES ($1,$2,$3,$4,$5)`,
-    [id, roundMoney(amount), sourceType, sourceId, note || '']
+    `INSERT INTO company_ledger (id, owner_admin_id, from_agent_id, amount, source_type, source_id, note)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [id, ownerAdminId || 'admin_super', fromAgentId || null, roundMoney(amount), sourceType, sourceId, note || '']
   )
   return id
 }
@@ -217,7 +217,7 @@ export async function allocateCommission(client, { fromAgentId, baseAmount, sour
   const totalForfeited = 0
   const companyNet = Math.max(0, roundMoney(cleanBaseAmount - totalPaid))
   if (companyNet > 0) {
-    await creditCompany(client, { amount: companyNet, sourceType: cleanSourceType, sourceId: cleanSourceId, note: 'Company net after paid commissions' })
+    await creditCompany(client, { amount: companyNet, sourceType: cleanSourceType, sourceId: cleanSourceId, note: 'Company net after paid commissions', ownerAdminId: ruleOwnerAdminId, fromAgentId })
   }
   const summary = { totalPaid, totalForfeited, totalSkipped, companyNet, rows, compressionEnabled: true }
   await client.query(
@@ -297,7 +297,7 @@ export async function placeRewardOrder({ agentId, productId, qty, customerName, 
   })
 }
 
-export async function adjustRewardBySuperAdmin({ adminId, agentId, amount, note }) {
+export async function adjustRewardByAdmin({ adminId, agentId, amount, note }) {
   return tx(async (client) => {
     await lockAgentBalance(client, agentId)
     const cleanAmount = roundMoney(Number(amount || 0))
@@ -314,11 +314,11 @@ export async function adjustRewardBySuperAdmin({ adminId, agentId, amount, note 
     }
     const sourceId = uid('adjust')
     if (cleanAmount > 0) {
-      await creditAgent(client, { agentId, amount: cleanAmount, sourceType: 'SUPER_ADMIN_ADJUST', sourceId, type: 'SUPER_ADMIN_CREDIT_IN', note: note || 'Super Admin manual Reward adjustment', createdByAdminId: adminId })
+      await creditAgent(client, { agentId, amount: cleanAmount, sourceType: 'ADMIN_ADJUST', sourceId, type: 'ADMIN_CREDIT_IN', note: note || 'Admin manual Reward adjustment', createdByAdminId: adminId })
     } else {
-      await debitAgent(client, { agentId, amount: Math.abs(cleanAmount), sourceType: 'SUPER_ADMIN_ADJUST', sourceId, type: 'SUPER_ADMIN_CREDIT_OUT', note: note || 'Super Admin manual Reward adjustment', createdByAdminId: adminId })
+      await debitAgent(client, { agentId, amount: Math.abs(cleanAmount), sourceType: 'ADMIN_ADJUST', sourceId, type: 'ADMIN_CREDIT_OUT', note: note || 'Admin manual Reward adjustment', createdByAdminId: adminId })
     }
-    await audit({ actorType: 'ADMIN', actorId: adminId, action: 'SUPER_ADMIN_REWARD_ADJUST', entityType: 'SALES_ADVISER', entityId: agentId, metadata: { amount: cleanAmount, note }, client })
+    await audit({ actorType: 'ADMIN', actorId: adminId, action: 'ADMIN_REWARD_ADJUST', entityType: 'SALES_ADVISER', entityId: agentId, metadata: { amount: cleanAmount, note }, client })
     return { sourceId, amount: cleanAmount }
   })
 }

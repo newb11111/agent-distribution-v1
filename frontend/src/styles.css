@@ -570,3 +570,4 @@ body { overflow-x: hidden; }
   border-radius: 14px;
   font-size: 13px;
 }
+.small-text { font-size: 12px; line-height: 1.4; }

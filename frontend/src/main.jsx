@@ -84,6 +84,13 @@ function sourceTypeText(t, value) { return translatedCode(t, 'source', value) }
 function ledgerTypeText(t, value) { return translatedCode(t, 'ledger', value) }
 function proofTypeText(t, value) { return translatedCode(t, 'type', value) }
 function generationText(t, value) { return Number(value) === 0 ? t('selfCommission') : `${t('level')} ${value}` }
+function ownerNameText(t, ownerId, name) {
+  const id = String(ownerId || '').trim()
+  const label = String(name || '').trim()
+  if (id === 'ALL' || label === 'All Admins') return t('allAdmins')
+  if (id === 'admin_super' || id === 'ALL' || label === 'HQ / Super Admin') return t('hqOwner')
+  return label || id || '-'
+}
 function noteText(t, value) {
   const raw = String(value || '').trim()
   if (!raw) return '-'
@@ -99,6 +106,7 @@ function noteText(t, value) {
   if (raw === 'Sales Adviser inactive/expired; commission compressed to active upline') return t('note_SkippedCompressed')
   if (/^Forfeited commission from level /i.test(raw)) return `${t('note_ForfeitedCommission')} · ${t('level')} ${raw.split(' ').pop()}`
   if (raw === 'Company net after paid and forfeited commissions' || raw === 'Company net after paid commissions') return t('note_CompanyNet')
+  if (raw === 'Admin manual Reward adjustment' || raw === 'Super Admin manual Reward adjustment') return t('note_AdminRewardAdjustment')
   if (raw === 'Product order paid by Reward') return t('note_ProductOrderPaidByReward')
   if (raw === 'Withdrawal requested; amount held') return t('note_WithdrawalRequested')
   if (raw === 'Withdrawal rejected; Reward refunded') return t('note_WithdrawalRejectedRefunded')
@@ -476,14 +484,15 @@ function Register({ lang, setLang, t }) {
       <Card className="narrow">
         <ErrorBox error={error} />
         {success && <div className="success-box">{success}</div>}
-        <Field label={t('email')}><input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
+        <Field label={t('email')}><input required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
         <div className="row gap align-end">
-          <Field label={t('tac')}><input value={form.tac} onChange={(e) => setForm({ ...form, tac: e.target.value })} /></Field>
+          <Field label={t('tac')}><input required value={form.tac} onChange={(e) => setForm({ ...form, tac: e.target.value })} /></Field>
           <TacSendControl t={t} onSend={sendTac} disabled={!form.email} cooldownKey={form.email} />
         </div>
-          <Field label={t('name')}><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-        <Field label={t('sponsorCode')}><input value={form.sponsorCode} onChange={(e) => setForm({ ...form, sponsorCode: e.target.value.toUpperCase() })} placeholder={t('sponsorPlaceholder')} /></Field>
-        <Button onClick={register}>{t('register')}</Button>
+          <Field label={t('name')}><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+        <Field label={t('sponsorCode')}><input required value={form.sponsorCode} onChange={(e) => setForm({ ...form, sponsorCode: e.target.value.toUpperCase() })} placeholder={t('sponsorPlaceholder')} /></Field>
+        <p className="muted small-text">{t('sponsorCodeRequiredHint')}</p>
+        <Button onClick={register} disabled={!form.sponsorCode.trim()}>{t('register')}</Button>
       </Card>
     </Layout>
   )
@@ -855,12 +864,12 @@ function AdminHome({ t, data, isSuper }) {
         <StatCard label={t('activeAgents')} value={s.activeAgents} />
         <StatCard label={t('frozenAgents')} value={s.frozenAgents} />
         <StatCard label={t('pendingWithdrawals')} value={s.pendingWithdrawals} />
-        {isSuper && <StatCard label={t('companyIncome')} value={money(s.totalCompanyIncome)} />}
+        <StatCard label={t('companyIncome')} value={money(s.totalCompanyIncome)} />
       </div>
-      {isSuper && <Card>
+      <Card>
         <h3>{t('commissionHistory')}</h3>
         <Table><tbody>{data.recentCommissions.length ? data.recentCommissions.map((r) => <tr key={r.id}><td>{generationText(t, r.generation)}</td><td>{sourceTypeText(t, r.sourceType)}</td><td>{money(r.amount)}</td><td><StatusBadge t={t} status={r.status} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
-      </Card>}
+      </Card>
     </>
   )
 }
@@ -923,19 +932,19 @@ function AdminAgents({ t, agents, pagination, ownerOptions = [], admin, reload }
           <Field label={t('email')}><input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
           <Field label={t('name')}><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
           <Field label={t('sponsorOptional')}><input value={form.sponsorCode} onChange={(e) => setForm({ ...form, sponsorCode: e.target.value.toUpperCase() })} /></Field>
-          {isSuper && <Field label={t('ownerScope')}><select value={form.ownerAdminId} onChange={(e) => setForm({ ...form, ownerAdminId: e.target.value })}>{ownerCreateOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></Field>}
+          {isSuper && <Field label={t('ownerScope')}><select value={form.ownerAdminId} onChange={(e) => setForm({ ...form, ownerAdminId: e.target.value })}>{ownerCreateOptions.map((o) => <option key={o.id} value={o.id}>{ownerNameText(t, o.id, o.name)}</option>)}</select></Field>}
         </div>
         <Button onClick={createSalesAdviser}>{t('save')}</Button>
       </Card>
       <Card>
-        <div className="section-head"><h3>{t('agents')}</h3><div className="row gap wrap">{isSuper && <select value={ownerFilter} onChange={(e) => { setOwnerFilter(e.target.value); runSearch(1, e.target.value) }}>{ownerOptions.map((o) => <option key={o.id} value={o.id}>{o.id === 'ALL' ? t('allAdmins') : o.name}</option>)}</select>}<SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div></div>
+        <div className="section-head"><h3>{t('agents')}</h3><div className="row gap wrap">{isSuper && <select value={ownerFilter} onChange={(e) => { setOwnerFilter(e.target.value); runSearch(1, e.target.value) }}>{ownerOptions.map((o) => <option key={o.id} value={o.id}>{ownerNameText(t, o.id, o.name)}</option>)}</select>}<SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div></div>
         <Table>
           <thead><tr><th>{t('agentCode')}</th><th>{t('name')}</th><th>{t('email')}</th><th>{t('phone')}</th><th>{t('owner')}</th><th>{t('sponsor')}</th><th>{t('balance')}</th><th>{t('annualFeeReminder')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead>
           <tbody>
             {rows.length ? rows.map((a) => (
               <tr key={a.id}>
-                <td>{a.agentCode}</td><td>{a.name}</td><td>{a.email}</td><td>{a.phone || a.profile?.phone || '-'}</td><td>{a.ownerName || '-'}</td><td>{a.sponsor?.agentCode || '-'}</td><td>{money(a.balance)}</td><td>{a.annualFeeDaysLeft} {t('days')}</td><td><StatusBadge t={t} status={a.status} /></td>
-                <td><ActionMenu t={t} actions={[{ label: t('addRewardCredit'), onClick: () => openCreditModal(a), hidden: !isSuper }, { label: t('active'), onClick: () => setStatus(a.id, 'ACTIVE') }, { label: t('frozen'), onClick: () => setStatus(a.id, 'FROZEN') }]} /></td>
+                <td>{a.agentCode}</td><td>{a.name}</td><td>{a.email}</td><td>{a.phone || a.profile?.phone || '-'}</td><td>{ownerNameText(t, a.ownerAdminId, a.ownerName)}</td><td>{a.sponsor?.agentCode || '-'}</td><td>{money(a.balance)}</td><td>{a.annualFeeDaysLeft} {t('days')}</td><td><StatusBadge t={t} status={a.status} /></td>
+                <td><ActionMenu t={t} actions={[{ label: t('addRewardCredit'), onClick: () => openCreditModal(a) }, { label: t('active'), onClick: () => setStatus(a.id, 'ACTIVE') }, { label: t('frozen'), onClick: () => setStatus(a.id, 'FROZEN') }]} /></td>
               </tr>
             )) : <tr><td><Empty t={t} /></td></tr>}
           </tbody>
@@ -1102,7 +1111,7 @@ function AdminRules({ t, rulesData, reload, isSuper = false }) {
       <div className="section-head"><h3>{t('commissionRules')}</h3><div className="row gap">{isSuper && <Button variant="secondary" onClick={runRenewal}>{t('runRenewalCheck')}</Button>}<Button onClick={save}>{t('save')}</Button></div></div>
       <div className="notice">{t('adminContactSettingsHint')}</div>
       <div className="form-grid small">
-        {isSuper && <Field label={t('editAdminSettingsFor')}><select value={selectedOwnerId} onChange={(e) => { setSelectedOwnerId(e.target.value); reload({ ownerAdminId: e.target.value }) }}>{ownerOptions.map((o) => <option key={o.id} value={o.id}>{o.id === 'admin_super' ? t('hqOwner') : o.name}</option>)}</select></Field>}
+        {isSuper && <Field label={t('editAdminSettingsFor')}><select value={selectedOwnerId} onChange={(e) => { setSelectedOwnerId(e.target.value); reload({ ownerAdminId: e.target.value }) }}>{ownerOptions.map((o) => <option key={o.id} value={o.id}>{ownerNameText(t, o.id, o.name)}</option>)}</select></Field>}
         <Field label={t('annualFeeAmount')}><input type="number" value={annualFeeAmount} onChange={(e) => setAnnualFeeAmount(e.target.value)} /></Field>
         <Field label={t('adminWhatsapp')}><input value={adminWhatsapp} onChange={(e) => setAdminWhatsapp(e.target.value)} placeholder="60123456789" /></Field>
         <Field label={t('whatsappText')}><textarea value={whatsappText} onChange={(e) => setWhatsappText(e.target.value)} placeholder={t('whatsappTextPlaceholder')} /></Field>
@@ -1135,7 +1144,7 @@ function AdminWallet({ t, wallet, pagination, reload, isSuper = false }) {
         <Table><tbody>{rows.length ? rows.map((w) => <tr key={w.id}><td>{w.agent?.agentCode}</td><td>{ledgerTypeText(t, w.type)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
         <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
       </Card>
-      {isSuper && <Card><h3>{t('companyLedger')}</h3><Table><tbody>{companyRows.length ? companyRows.map((w) => <tr key={w.id}><td>{sourceTypeText(t, w.sourceType)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>}
+      <Card><h3>{t('companyLedger')}</h3><Table><tbody>{companyRows.length ? companyRows.map((w) => <tr key={w.id}><td>{sourceTypeText(t, w.sourceType)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
     </div>
   )
 }
@@ -1201,7 +1210,7 @@ function AdminReports({ t, summary, isSuper = false }) {
         <StatCard label={t('approvedOrders')} value={s.approvedOrders || 0} />
         <StatCard label={t('totalCommission')} value={money(s.totalCommission)} />
         <StatCard label={t('totalWithdrawalsPaid')} value={money(s.totalWithdrawalsPaid)} />
-        {isSuper && <StatCard label={t('companyIncome')} value={money(s.totalCompanyIncome)} />}
+        <StatCard label={t('companyIncome')} value={money(s.totalCompanyIncome)} />
         <StatCard label={t('totalSalesAdvisers')} value={s.totalSalesAdvisers || 0} />
         <StatCard label={t('activeSalesAdvisers')} value={s.activeSalesAdvisers || 0} />
       </div>

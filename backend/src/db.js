@@ -214,6 +214,8 @@ export async function initDatabase() {
 
     CREATE TABLE IF NOT EXISTS company_ledger (
       id TEXT PRIMARY KEY,
+      owner_admin_id TEXT NOT NULL DEFAULT 'admin_super',
+      from_agent_id TEXT REFERENCES sales_advisers(id) ON DELETE SET NULL,
       amount NUMERIC(12,2) NOT NULL,
       source_type TEXT NOT NULL,
       source_id TEXT NOT NULL,
@@ -263,6 +265,22 @@ export async function initDatabase() {
   await query(`ALTER TABLE sales_advisers ADD COLUMN IF NOT EXISTS owner_admin_id TEXT NOT NULL DEFAULT 'admin_super'`)
   await query(`ALTER TABLE commission_rules ADD COLUMN IF NOT EXISTS owner_admin_id TEXT NOT NULL DEFAULT 'admin_super'`)
   await query(`ALTER TABLE commission_ledger ADD COLUMN IF NOT EXISTS owner_admin_id TEXT NOT NULL DEFAULT 'admin_super'`)
+  await query(`ALTER TABLE company_ledger ADD COLUMN IF NOT EXISTS owner_admin_id TEXT NOT NULL DEFAULT 'admin_super'`)
+  await query(`ALTER TABLE company_ledger ADD COLUMN IF NOT EXISTS from_agent_id TEXT REFERENCES sales_advisers(id) ON DELETE SET NULL`)
+  await query(`
+    UPDATE company_ledger c
+    SET owner_admin_id = COALESCE(x.owner_admin_id, c.owner_admin_id),
+        from_agent_id = COALESCE(x.from_agent_id, c.from_agent_id)
+    FROM (
+      SELECT DISTINCT ON (source_type, source_id)
+        source_type, source_id, owner_admin_id, from_agent_id
+      FROM commission_ledger
+      ORDER BY source_type, source_id, created_at ASC
+    ) x
+    WHERE c.source_type = x.source_type
+      AND c.source_id = x.source_id
+      AND (c.from_agent_id IS NULL OR c.owner_admin_id = 'admin_super')
+  `)
   await query(`ALTER TABLE commission_rules DROP CONSTRAINT IF EXISTS commission_rules_kind_generation_key`)
 
   await query(`CREATE INDEX IF NOT EXISTS idx_sales_advisers_owner ON sales_advisers(owner_admin_id)`)
@@ -281,6 +299,8 @@ export async function initDatabase() {
   await query(`CREATE INDEX IF NOT EXISTS idx_withdrawals_created ON withdrawals(created_at DESC)`)
   await query(`CREATE INDEX IF NOT EXISTS idx_withdrawals_status_agent ON withdrawals(status, agent_id)`)
   await query(`CREATE INDEX IF NOT EXISTS idx_company_ledger_created ON company_ledger(created_at DESC)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_company_ledger_owner_created ON company_ledger(owner_admin_id, created_at DESC)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_company_ledger_from_agent ON company_ledger(from_agent_id)`)
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_commission_rules_owner_kind_generation ON commission_rules(owner_admin_id, kind, generation)`)
 
   await seedDefaultData()

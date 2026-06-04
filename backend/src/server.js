@@ -42,7 +42,7 @@ import {
 import { createOtp, normalizeEmail, verifyOtp } from './mail.js'
 import {
   activateAnnualFee,
-  adjustRewardBySuperAdmin,
+  adjustRewardByAdmin,
   getAgentBalance,
   getRules,
   placeRewardOrder,
@@ -78,7 +78,7 @@ function rowToLedger(w) {
   return { id: w.id, agentId: w.agent_id, type: w.type, amount: Number(w.amount || 0), sourceType: w.source_type, sourceId: w.source_id, status: w.status, note: w.note, createdByAdminId: w.created_by_admin_id, createdAt: w.created_at }
 }
 function rowToCompany(w) {
-  return { id: w.id, amount: Number(w.amount || 0), sourceType: w.source_type, sourceId: w.source_id, note: w.note, createdAt: w.created_at }
+  return { id: w.id, ownerAdminId: w.owner_admin_id, fromAgentId: w.from_agent_id, amount: Number(w.amount || 0), sourceType: w.source_type, sourceId: w.source_id, note: w.note, createdAt: w.created_at }
 }
 
 async function nextAgentCode(client = pool) {
@@ -133,6 +133,13 @@ async function scopedAgentIds(admin) {
 function makeInClause(ids, startIndex = 1) {
   if (!ids.length) return { sql: '(NULL)', params: [] }
   return { sql: `(${ids.map((_, i) => `$${i + startIndex}`).join(',')})`, params: ids }
+}
+
+function scopedCompanyLedgerWhere(admin, companyAlias = 'c', agentAlias = 'a') {
+  if (admin?.role === 'SUPER_ADMIN') return { sql: 'TRUE', params: [] }
+  const scope = adminDataScopeId(admin)
+  if (!scope || scope === 'ALL') return { sql: 'TRUE', params: [] }
+  return { sql: `(${companyAlias}.owner_admin_id = $1 OR ${agentAlias}.owner_admin_id = $1)`, params: [scope] }
 }
 
 function pageParams(req, defaultLimit = 50, maxLimit = 100) {
@@ -390,18 +397,21 @@ app.post('/api/auth/register', async (req, res, next) => {
     const email = cleanEmail(req.body.email)
     const name = cleanText(req.body.name) || email
     const sponsorCode = cleanText(req.body.sponsorCode).toUpperCase()
+    if (!sponsorCode) return res.status(400).json({ error: 'SPONSOR_CODE_REQUIRED' })
     await verifyOtp(email, req.body.tac, 'LOGIN_REGISTER')
     const result = await tx(async (client) => {
       const exists = await client.query('SELECT id FROM sales_advisers WHERE email=$1', [email])
       if (exists.rowCount) throw new Error('EMAIL_ALREADY_REGISTERED')
       const sponsor = await findSponsor(client, sponsorCode)
+      if (!sponsor) throw new Error('INVALID_SPONSOR_CODE')
+      if (!isActiveStatus(sponsor.status) || daysLeft(sponsor.annual_fee_expires_at) <= 0) throw new Error('SPONSOR_NOT_ACTIVE')
       const code = await nextAgentCode(client)
       const id = uid('agent')
-      const ownerAdminId = sponsor?.owner_admin_id || 'admin_super'
+      const ownerAdminId = sponsor.owner_admin_id || 'admin_super'
       await client.query(
         `INSERT INTO sales_advisers (id, agent_code, email, name, sponsor_agent_id, owner_admin_id, status, referral_code, profile)
          VALUES ($1,$2,$3,$4,$5,$6,'PENDING_FEE',$2,'{}')`,
-        [id, code, email, name, sponsor?.id || null, ownerAdminId]
+        [id, code, email, name, sponsor.id, ownerAdminId]
       )
       await audit({ actorType: 'SALES_ADVISER', actorId: id, action: 'REGISTER', entityType: 'SALES_ADVISER', entityId: id, metadata: { sponsorCode, ownerAdminId }, client })
       const row = (await client.query('SELECT * FROM sales_advisers WHERE id=$1', [id])).rows[0]
@@ -435,6 +445,8 @@ app.get('/api/config', async (req, res, next) => {
 app.get('/api/admin/dashboard', requireAdmin, requireOfficeAdmin, requireAdminPermission('dashboard'), async (req, res, next) => {
   try {
     const scoped = scopedAgentsWhere(req.admin, 'a')
+    const companyScoped = scopedCompanyLedgerWhere(req.admin, 'c', 'ca')
+    const recentScoped = scopedAgentsWhere(req.admin, 'ra')
     const [agentStats, proofs, withdrawals, company, recent] = await Promise.all([
       query(
         `SELECT
@@ -459,12 +471,22 @@ app.get('/api/admin/dashboard', requireAdmin, requireOfficeAdmin, requireAdminPe
          WHERE ${scoped.sql} AND w.status='PENDING'`,
         scoped.params
       ),
-      req.admin.role === 'SUPER_ADMIN'
-        ? query("SELECT COALESCE(SUM(amount),0)::numeric AS total FROM company_ledger")
-        : Promise.resolve({ rows: [{ total: 0 }] }),
-      req.admin.role === 'SUPER_ADMIN'
-        ? query('SELECT * FROM commission_ledger ORDER BY created_at DESC LIMIT 20')
-        : Promise.resolve({ rows: [] })
+      query(
+        `SELECT COALESCE(SUM(c.amount),0)::numeric AS total
+         FROM company_ledger c
+         LEFT JOIN sales_advisers ca ON ca.id=c.from_agent_id
+         WHERE ${companyScoped.sql}`,
+        companyScoped.params
+      ),
+      query(
+        `SELECT c.*
+         FROM commission_ledger c
+         LEFT JOIN sales_advisers ra ON ra.id=c.to_agent_id
+         WHERE ${recentScoped.sql}
+         ORDER BY c.created_at DESC
+         LIMIT 20`,
+        recentScoped.params
+      )
     ])
 
     const statsRow = agentStats.rows[0] || {}
@@ -547,9 +569,15 @@ app.post('/api/admin/agents', requireAdmin, requireOfficeAdmin, requireAdminPerm
     const id = await tx(async (client) => {
       const exists = await client.query('SELECT id FROM sales_advisers WHERE email=$1', [email])
       if (exists.rowCount) throw new Error('EMAIL_ALREADY_REGISTERED')
-      const sponsor = await findSponsor(client, req.body.sponsorCode)
+      const sponsorCode = cleanText(req.body.sponsorCode).toUpperCase()
+      const sponsor = sponsorCode ? await findSponsor(client, sponsorCode) : null
+      if (sponsorCode && !sponsor) throw new Error('INVALID_SPONSOR_CODE')
       let ownerAdminId = req.admin.role === 'SUPER_ADMIN' ? (req.body.ownerAdminId || 'admin_super') : req.admin.id
       if (req.admin.role !== 'SUPER_ADMIN') ownerAdminId = req.admin.id
+      if (sponsor) {
+        if (req.admin.role !== 'SUPER_ADMIN' && sponsor.owner_admin_id !== req.admin.id) throw new Error('NO_SCOPE')
+        if (req.admin.role === 'SUPER_ADMIN' && ownerAdminId !== sponsor.owner_admin_id) throw new Error('SPONSOR_OWNER_MISMATCH')
+      }
       const code = await nextAgentCode(client)
       const agentId = uid('agent')
       await client.query(
@@ -598,9 +626,10 @@ app.patch('/api/admin/agents/:id/status', requireAdmin, requireOfficeAdmin, requ
   } catch (err) { next(err) }
 })
 
-app.post('/api/admin/agents/:id/reward-credit', requireAdmin, requireSuperAdmin, async (req, res, next) => {
+app.post('/api/admin/agents/:id/reward-credit', requireAdmin, requireOfficeAdmin, requireAdminPermission('agents'), async (req, res, next) => {
   try {
-    const result = await adjustRewardBySuperAdmin({ adminId: req.admin.id, agentId: req.params.id, amount: req.body.amount, note: req.body.note })
+    if (!(await canAccessAgent(req.admin, req.params.id))) return res.status(403).json({ error: 'NO_SCOPE' })
+    const result = await adjustRewardByAdmin({ adminId: req.admin.id, agentId: req.params.id, amount: req.body.amount, note: req.body.note })
     res.json({ ok: true, result })
   } catch (err) { next(err) }
 })
@@ -805,9 +834,18 @@ app.get('/api/admin/wallet-ledger', requireAdmin, requireOfficeAdmin, requireAdm
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
         params
       ),
-      req.admin.role === 'SUPER_ADMIN'
-        ? query('SELECT * FROM company_ledger ORDER BY created_at DESC LIMIT 100')
-        : Promise.resolve({ rows: [] })
+      (() => {
+        const companyScoped = scopedCompanyLedgerWhere(req.admin, 'c', 'ca')
+        return query(
+          `SELECT c.*
+           FROM company_ledger c
+           LEFT JOIN sales_advisers ca ON ca.id=c.from_agent_id
+           WHERE ${companyScoped.sql}
+           ORDER BY c.created_at DESC
+           LIMIT 100`,
+          companyScoped.params
+        )
+      })()
     ])
     const rows = reward.rows.map((w) => ({ ...rowToLedger(w), agent: { name: w.agent_name, agentCode: w.agent_code } }))
     res.json({ rows, companyLedger: company.rows.map(rowToCompany), pagination: paginationMeta(reward.rows[0]?.total_count || 0, page, limit) })
@@ -906,10 +944,18 @@ async function reportData(type, admin) {
     rows.push(['Commission ID','From Agent','To Agent','Generation','Source Type','Amount RM','Status','Created At'])
     const data = ids.length ? await query(`SELECT c.*, f.agent_code from_code, t.agent_code to_code FROM commission_ledger c LEFT JOIN sales_advisers f ON f.id=c.from_agent_id LEFT JOIN sales_advisers t ON t.id=c.to_agent_id WHERE c.from_agent_id IN ${inClause.sql} OR c.to_agent_id IN ${inClause.sql} ORDER BY c.created_at DESC`, inClause.params) : { rows: [] }
     data.rows.forEach((c) => rows.push([c.id, c.from_code, c.to_code, c.generation, c.source_type, Number(c.amount), c.status, c.created_at]))
-  } else if (type === 'companyLedger' && admin.role === 'SUPER_ADMIN') {
-    rows.push(['Ledger ID','Amount RM','Source Type','Source ID','Note','Created At'])
-    const data = await query('SELECT * FROM company_ledger ORDER BY created_at DESC')
-    data.rows.forEach((c) => rows.push([c.id, Number(c.amount), c.source_type, c.source_id, c.note, c.created_at]))
+  } else if (type === 'companyLedger') {
+    rows.push(['Ledger ID','Owner Admin ID','From Agent ID','Amount RM','Source Type','Source ID','Note','Created At'])
+    const companyScoped = scopedCompanyLedgerWhere(admin, 'c', 'a')
+    const data = await query(
+      `SELECT c.*
+       FROM company_ledger c
+       LEFT JOIN sales_advisers a ON a.id=c.from_agent_id
+       WHERE ${companyScoped.sql}
+       ORDER BY c.created_at DESC`,
+      companyScoped.params
+    )
+    data.rows.forEach((c) => rows.push([c.id, c.owner_admin_id, c.from_agent_id, Number(c.amount), c.source_type, c.source_id, c.note, c.created_at]))
   } else {
     rows.push(['No data'])
   }
@@ -919,7 +965,7 @@ async function reportData(type, admin) {
 app.get('/api/admin/reports/summary', requireAdmin, requireOfficeAdmin, requireAdminPermission('reports'), async (req, res, next) => {
   try {
     const scoped = scopedAgentsWhere(req.admin, 'a')
-    const types = ['orders', 'commissions', 'rewardLedger', 'withdrawals', 'salesAdvisers', ...(req.admin.role === 'SUPER_ADMIN' ? ['companyLedger'] : [])]
+    const types = ['orders', 'commissions', 'rewardLedger', 'withdrawals', 'salesAdvisers', 'companyLedger']
     const [agentStats, orderStats, comm, wd, company] = await Promise.all([
       query(
         `SELECT COUNT(*)::int total, COUNT(*) FILTER (WHERE a.status='ACTIVE')::int active
@@ -950,9 +996,16 @@ app.get('/api/admin/reports/summary', requireAdmin, requireOfficeAdmin, requireA
          WHERE ${scoped.sql} AND w.status='PAID'`,
         scoped.params
       ),
-      req.admin.role === 'SUPER_ADMIN'
-        ? query('SELECT COALESCE(SUM(amount),0)::numeric total FROM company_ledger')
-        : Promise.resolve({ rows: [{ total: 0 }] })
+      (() => {
+        const companyScoped = scopedCompanyLedgerWhere(req.admin, 'c', 'ca')
+        return query(
+          `SELECT COALESCE(SUM(c.amount),0)::numeric total
+           FROM company_ledger c
+           LEFT JOIN sales_advisers ca ON ca.id=c.from_agent_id
+           WHERE ${companyScoped.sql}`,
+          companyScoped.params
+        )
+      })()
     ])
 
     const stats = {
