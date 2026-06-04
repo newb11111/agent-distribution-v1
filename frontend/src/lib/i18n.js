@@ -215,6 +215,7 @@ export const dict = {
     qrImageTooLarge: '二维码图片太大，请使用小于 1.5 兆的图片。',
     qrImageUploadFailed: '二维码图片上传失败。',
     adminContactSettingsHint: '每个管理员的年费、分佣、联系方式和付款资料都是独立的；没有保存资料时不会自动使用总部资料。',
+    autoRenewalCronHint: '年费自动续费检查由后台系统每天自动执行；手动执行按钮已移除。',
     editAdminSettingsFor: '正在设置的管理员',
     linkCopied: '注册链接已复制。',
     orderDeductRewardHint: '下单会直接从销售顾问的奖励余额扣款，不需要再提交付款证明。',
@@ -548,6 +549,7 @@ export const dict = {
     qrImageTooLarge: 'QR image is too large. Please use an image under 1.5MB.',
     qrImageUploadFailed: 'QR image upload failed.',
     adminContactSettingsHint: 'Annual fee, commission, WhatsApp and payment details are independent for each Admin. Empty Admin settings will not inherit HQ settings.',
+    autoRenewalCronHint: 'Annual renewal is checked automatically by the backend every day. The manual run button has been removed.',
     editAdminSettingsFor: 'Editing settings for',
     linkCopied: 'Registration link copied.',
     orderDeductRewardHint: 'Orders are paid directly from the Sales Adviser Reward balance. No payment proof is required.',
@@ -881,6 +883,7 @@ export const dict = {
     qrImageTooLarge: 'Imej QR terlalu besar. Sila guna imej bawah 1.5MB.',
     qrImageUploadFailed: 'Upload imej QR gagal.',
     adminContactSettingsHint: 'Yuran tahunan, komisen, WhatsApp dan butiran bayaran adalah berasingan untuk setiap Admin. Tetapan kosong tidak akan mewarisi tetapan HQ.',
+    autoRenewalCronHint: 'Semakan auto-renew yuran tahunan dijalankan secara automatik setiap hari oleh backend. Butang manual telah dibuang.',
     editAdminSettingsFor: 'Ubah tetapan untuk',
     linkCopied: 'Pautan pendaftaran telah disalin.',
     orderDeductRewardHint: 'Pesanan akan dibayar terus daripada baki Reward Sales Adviser. Bukti bayaran tidak diperlukan.',
@@ -1006,5 +1009,5 @@ export const dict = {
   }}
 
 export function createTranslator(lang) {
-  return (key) => dict[lang]?.[key] || dict.zh[key] || key
+  return (key) => dict[lang]?.[key] || dict.en?.[key] || dict.zh[key] || key
 }

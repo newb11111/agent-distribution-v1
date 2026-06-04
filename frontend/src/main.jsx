@@ -91,6 +91,14 @@ function ownerNameText(t, ownerId, name) {
   if (id === 'admin_super' || id === 'ALL' || label === 'HQ / Super Admin') return t('hqOwner')
   return label || id || '-'
 }
+
+function roleText(t, role) {
+  const raw = String(role || '').trim()
+  if (!raw) return '-'
+  const translated = t(raw)
+  return translated && translated !== raw ? translated : raw.replaceAll('_', ' ')
+}
+
 function noteText(t, value) {
   const raw = String(value || '').trim()
   if (!raw) return '-'
@@ -758,7 +766,7 @@ function AdminUsers({ t, admins, pagination, reload }) {
           <Field label={t('adminCode')}><input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} /></Field>
           <Field label={t('password')}><input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
           <Field label={t('name')}><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-          <Field label={t('role')}><select value={form.role} onChange={(e) => updateRole(e.target.value)}><option value="LEADER">{t('LEADER')}</option><option value="FULFILLMENT">{t('FULFILLMENT')}</option></select></Field>
+          <Field label={t('role')}><select key={`create-role-${roleText(t, 'LEADER')}-${roleText(t, 'FULFILLMENT')}`} value={form.role} onChange={(e) => updateRole(e.target.value)}><option value="LEADER">{roleText(t, 'LEADER')}</option><option value="FULFILLMENT">{roleText(t, 'FULFILLMENT')}</option></select></Field>
         </div>
         {form.role === 'LEADER' && <PermissionChecklist t={t} value={form.permissions} onChange={(permissions) => setForm({ ...form, permissions })} />}
         <Button onClick={create}>{t('save')}</Button>
@@ -771,7 +779,7 @@ function AdminUsers({ t, admins, pagination, reload }) {
             { label: t('changePassword'), variant: 'secondary', onClick: () => openPassword(a), hidden: a.role === 'SUPER_ADMIN' },
             { label: a.status === 'ACTIVE' ? t('hidden') : t('active'), onClick: () => setStatus(a.id, a.status === 'ACTIVE' ? 'HIDDEN' : 'ACTIVE'), hidden: a.role === 'SUPER_ADMIN' }
           ]
-          return <tr key={a.id}><td>{a.code}</td><td>{a.name}</td><td>{t(a.role)}</td><td>{a.role === 'SUPER_ADMIN' ? t('hqOwner') : ownerNameText(t, a.scopeOwnerAdminId, a.name)}</td><td>{a.downlineCount ?? 0}</td><td><StatusBadge t={t} status={a.status} /></td><td><ActionMenu t={t} actions={actions} /></td></tr>
+          return <tr key={a.id}><td>{a.code}</td><td>{a.name}</td><td>{roleText(t, a.role)}</td><td>{a.role === 'SUPER_ADMIN' ? t('hqOwner') : ownerNameText(t, a.scopeOwnerAdminId, a.name)}</td><td>{a.downlineCount ?? 0}</td><td><StatusBadge t={t} status={a.status} /></td><td><ActionMenu t={t} actions={actions} /></td></tr>
         })}</tbody></Table>
         <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
       </Card>
@@ -1090,13 +1098,6 @@ function AdminRules({ t, rulesData, reload, isSuper = false }) {
     } catch (err) { showError(setNotice, t, err) }
   }
 
-  async function runRenewal() {
-    try {
-      const data = await api('/api/admin/run-annual-renewal-check', { method: 'POST' }, 'admin')
-      setNotice({ title: t('success'), message: `${t('renewalCheckDone')}: ${data.result.length}`, type: 'success' })
-      reload()
-    } catch (err) { showError(setNotice, t, err) }
-  }
 
   const editor = (title, kind, list) => (
     <div>
@@ -1108,8 +1109,9 @@ function AdminRules({ t, rulesData, reload, isSuper = false }) {
   return (
     <Card>
       <CenterNotice open={Boolean(notice)} title={notice?.title} message={notice?.message} type={notice?.type} onClose={() => setNotice(null)} />
-      <div className="section-head"><h3>{t('commissionRules')}</h3><div className="row gap">{isSuper && <Button variant="secondary" onClick={runRenewal}>{t('runRenewalCheck')}</Button>}<Button onClick={save}>{t('save')}</Button></div></div>
+      <div className="section-head"><h3>{t('commissionRules')}</h3><div className="row gap"><Button onClick={save}>{t('save')}</Button></div></div>
       <div className="notice">{t('adminContactSettingsHint')}</div>
+      <div className="notice">{t('autoRenewalCronHint')}</div>
       <div className="form-grid small">
         {isSuper && <Field label={t('editAdminSettingsFor')}><select value={selectedOwnerId} onChange={(e) => { setSelectedOwnerId(e.target.value); reload({ ownerAdminId: e.target.value }) }}>{ownerOptions.map((o) => <option key={o.id} value={o.id}>{ownerNameText(t, o.id, o.name)}</option>)}</select></Field>}
         <Field label={t('annualFeeAmount')}><input type="number" value={annualFeeAmount} onChange={(e) => setAnnualFeeAmount(e.target.value)} /></Field>
