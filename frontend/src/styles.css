@@ -571,3 +571,89 @@ body { overflow-x: hidden; }
   font-size: 13px;
 }
 .small-text { font-size: 12px; line-height: 1.4; }
+
+/* V1.5.24: Team Management / Member Tree layout. Stats stay only in Overview. */
+.team-tree-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(320px, .95fr);
+  gap: 16px;
+  align-items: start;
+}
+.member-tree-list {
+  display: grid;
+  gap: 4px;
+}
+.member-tree-node {
+  display: grid;
+  gap: 4px;
+}
+.member-tree-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 14px;
+  padding: 9px 10px;
+  cursor: pointer;
+  text-align: left;
+  color: #102033;
+}
+.member-tree-row:hover,
+.member-tree-row.selected {
+  background: #eef7ff;
+  border-color: #d5e9ff;
+}
+.member-branch {
+  width: 18px;
+  color: #0a66c2;
+  font-weight: 900;
+  text-align: center;
+}
+.member-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: minmax(110px, .45fr) minmax(0, 1fr);
+  border: 1px solid #e1ebf5;
+  border-radius: 16px;
+  overflow: hidden;
+  background: white;
+}
+.detail-grid span,
+.detail-grid strong {
+  padding: 11px 12px;
+  border-bottom: 1px solid #edf2f7;
+  word-break: break-word;
+}
+.detail-grid span {
+  color: #526577;
+  font-weight: 800;
+  background: #f7fbff;
+}
+.detail-grid strong {
+  color: #102033;
+  font-weight: 800;
+}
+.detail-grid span:nth-last-child(-n+2),
+.detail-grid strong:nth-last-child(-n+1) {
+  border-bottom: 0;
+}
+.tree-note {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.wrap { flex-wrap: wrap; }
+@media (max-width: 900px) {
+  .team-tree-layout { grid-template-columns: 1fr; }
+  .member-indent { max-width: 66px; }
+  .member-tree-row { padding: 9px 8px; }
+  .detail-grid { grid-template-columns: 105px minmax(0, 1fr); }
+}

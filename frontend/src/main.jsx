@@ -219,8 +219,8 @@ function buildWhatsappUrl(phone, text) {
 }
 
 
-function buildAdminWhatsappMessage(template, { amount, agentCode, agentName }) {
-  const base = String(template || '你好管理员，我要处理年费 {金额}。销售顾问：{顾问编号}（{顾问名字}）')
+function buildAdminWhatsappMessage(template, { amount, agentCode, agentName, fallbackTemplate }) {
+  const base = String(template || fallbackTemplate || '')
   return base
     .replaceAll('{amount}', money(amount))
     .replaceAll('{金额}', money(amount))
@@ -364,7 +364,7 @@ function hasAdminPermission(admin, key) {
 }
 
 function normalizeTab(tab) {
-  return tab === 'adminUsers' ? 'adminUsers' : tab
+  return tab === 'teamManagement' ? 'teamManagement' : (tab === 'adminUsers' ? 'adminUsers' : tab)
 }
 
 function Landing({ lang, setLang, t }) {
@@ -551,8 +551,8 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
   }
 
   const isSuper = admin?.role === 'SUPER_ADMIN'
-  const baseTabs = ['dashboard', 'adminUsers', 'agents', 'products', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
-  const tabs = baseTabs.filter((x) => x === 'adminUsers' ? isSuper : hasAdminPermission(admin, x))
+  const baseTabs = ['dashboard', 'teamManagement', 'products', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
+  const tabs = baseTabs.filter((x) => x === 'teamManagement' ? (isSuper || hasAdminPermission(admin, 'agents')) : hasAdminPermission(admin, x))
   const [tab, setTab] = useState(tabs[0] || '')
   const [data, setData] = useState({})
   const dataRef = useRef({})
@@ -560,6 +560,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
   const warmupStartedRef = useRef(false)
   const [loading, setLoading] = useState({})
   const [error, setError] = useState('')
+  const [teamRefreshToken, setTeamRefreshToken] = useState(0)
 
   useEffect(() => { dataRef.current = data }, [data])
 
@@ -592,8 +593,8 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
 
   async function loadTab(key = tab, params = {}, force = false, options = {}) {
     if (!key) return null
-    if (key === 'adminUsers' && !isSuper) return null
-    if (key !== 'adminUsers' && !hasAdminPermission(admin, key)) return null
+    if (key === 'teamManagement') return null
+    if (!hasAdminPermission(admin, key)) return null
 
     const hasParams = Boolean(Object.keys(params || {}).length)
     const requestKey = `${key}:${buildQuery(params)}`
@@ -627,7 +628,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
     return request
   }
 
-  useEffect(() => { if (tab) loadTab(tab) }, [tab])
+  useEffect(() => { if (tab && tab !== 'teamManagement') loadTab(tab) }, [tab])
   useEffect(() => { if (!tabs.includes(tab)) setTab(tabs[0] || '') }, [admin?.permissions?.join(','), admin?.role])
 
   if (!tabs.length) {
@@ -644,7 +645,13 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
     )
   }
 
-  const refreshActive = () => loadTab(tab, {}, true)
+  const refreshActive = () => {
+    if (tab === 'teamManagement') {
+      setTeamRefreshToken((x) => x + 1)
+      return
+    }
+    loadTab(tab, {}, true)
+  }
   const currentData = data[tab]
   const isLoading = Boolean(loading[tab])
 
@@ -664,8 +671,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
       {isLoading && !currentData ? <Card>{t('loading')}...</Card> : (
         <>
           {tab === 'dashboard' && currentData && <AdminHome t={t} data={currentData} isSuper={isSuper} />}
-          {tab === 'adminUsers' && isSuper && currentData && <AdminUsers t={t} admins={currentData.admins || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('adminUsers', params, true)} />}
-          {tab === 'agents' && currentData && <AdminAgents t={t} agents={currentData.agents || []} pagination={currentData.pagination} ownerOptions={currentData.ownerOptions || []} admin={admin} reload={(params = {}) => loadTab('agents', params, true)} />}
+          {tab === 'teamManagement' && <AdminTeamManagement t={t} admin={admin} isSuper={isSuper} refreshToken={teamRefreshToken} />}
           {tab === 'products' && currentData && <AdminProducts t={t} products={currentData.products || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('products', params, true)} />}
           {tab === 'commissionRules' && currentData && <AdminRules t={t} rulesData={currentData} reload={(params = {}) => loadTab('commissionRules', params, true)} isSuper={isSuper} />}
           {tab === 'reward' && currentData && <AdminWallet t={t} wallet={currentData} pagination={currentData.pagination} reload={(params = {}) => loadTab('reward', params, true)} isSuper={isSuper} />}
@@ -693,6 +699,142 @@ function PermissionChecklist({ t, value, onChange, disabled = false }) {
           <span>{t(`permission_${key}`)}</span>
         </label>
       ))}
+    </div>
+  )
+}
+
+
+function AdminTeamManagement({ t, admin, isSuper, refreshToken = 0 }) {
+  const innerTabs = isSuper ? ['adminUsers', 'agents', 'memberTree'] : ['agents', 'memberTree']
+  const [innerTab, setInnerTab] = useState(innerTabs[0])
+  const [data, setData] = useState({})
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  async function loadInner(key = innerTab, params = {}) {
+    setError('')
+    setLoading(true)
+    try {
+      const query = buildQuery(params)
+      const map = {
+        adminUsers: '/api/admin/admin-users',
+        agents: '/api/admin/agents',
+        memberTree: '/api/admin/member-tree'
+      }
+      const payload = await api(`${map[key]}${query}`, {}, 'admin')
+      setData((x) => ({ ...x, [key]: payload }))
+      return payload
+    } catch (err) {
+      setError(err.message)
+      throw err
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { loadInner(innerTab).catch(() => null) }, [innerTab])
+  useEffect(() => { if (refreshToken > 0) loadInner(innerTab).catch(() => null) }, [refreshToken])
+  useEffect(() => { if (!innerTabs.includes(innerTab)) setInnerTab(innerTabs[0]) }, [admin?.role])
+
+  const current = data[innerTab]
+  return (
+    <>
+      <Card>
+        <div className="section-head">
+          <div>
+            <h3>{t('teamManagement')}</h3>
+            <p className="muted">{t('teamManagementSubtitle')}</p>
+          </div>
+        </div>
+        <MobileTabs t={t} tabs={innerTabs} tab={innerTab} setTab={setInnerTab} />
+      </Card>
+      <ErrorBox error={error} />
+      {loading && !current ? <Card>{t('loading')}...</Card> : (
+        <>
+          {innerTab === 'adminUsers' && isSuper && current && <AdminUsers t={t} admins={current.admins || []} pagination={current.pagination} reload={(params = {}) => loadInner('adminUsers', params)} />}
+          {innerTab === 'agents' && current && <AdminAgents t={t} agents={current.agents || []} pagination={current.pagination} ownerOptions={current.ownerOptions || []} admin={admin} reload={(params = {}) => loadInner('agents', params)} />}
+          {innerTab === 'memberTree' && current && <AdminMemberTree t={t} tree={current} reload={(params = {}) => loadInner('memberTree', params)} isSuper={isSuper} />}
+        </>
+      )}
+    </>
+  )
+}
+
+function buildMemberTree(agents = []) {
+  const bySponsor = new Map()
+  agents.forEach((agent) => {
+    const key = agent.sponsorAgentId || 'ROOT'
+    if (!bySponsor.has(key)) bySponsor.set(key, [])
+    bySponsor.get(key).push(agent)
+  })
+  const sortRows = (rows) => [...rows].sort((a, b) => String(a.agentCode || '').localeCompare(String(b.agentCode || '')))
+  function childrenOf(id) {
+    return sortRows(bySponsor.get(id) || [])
+  }
+  return { roots: sortRows(bySponsor.get('ROOT') || []), childrenOf }
+}
+
+function AdminMemberTree({ t, tree, reload, isSuper }) {
+  const [search, setSearch] = useState('')
+  const [ownerFilter, setOwnerFilter] = useState('ALL')
+  const [selected, setSelected] = useState(null)
+  const agents = tree.agents || []
+  const ownerOptions = tree.ownerOptions || []
+  const { roots, childrenOf } = buildMemberTree(agents)
+  const selectedAgent = selected || agents[0] || null
+
+  function runSearch(nextOwner = ownerFilter) {
+    reload({ search, ownerAdminId: isSuper ? nextOwner : undefined })
+  }
+
+  function MemberNode({ agent, level = 0 }) {
+    const children = childrenOf(agent.id)
+    return (
+      <div className="member-tree-node">
+        <button type="button" className={`member-tree-row ${selectedAgent?.id === agent.id ? 'selected' : ''}`} onClick={() => setSelected(agent)}>
+          <span className="member-indent" style={{ width: `${level * 22}px` }} />
+          <span className="member-branch">{children.length ? '▾' : '•'}</span>
+          <span className="member-name"><strong>{agent.agentCode}</strong> {agent.name}</span>
+          <StatusBadge t={t} status={agent.status} />
+        </button>
+        {children.map((child) => <MemberNode key={child.id} agent={child} level={level + 1} />)}
+      </div>
+    )
+  }
+
+  return (
+    <div className="team-tree-layout">
+      <Card>
+        <div className="section-head">
+          <h3>{t('memberTree')}</h3>
+          <div className="row gap wrap">
+            {isSuper && <select value={ownerFilter} onChange={(e) => { setOwnerFilter(e.target.value); runSearch(e.target.value) }}>{ownerOptions.map((o) => <option key={o.id} value={o.id}>{ownerNameText(t, o.id, o.name)}</option>)}</select>}
+            <SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch()} />
+          </div>
+        </div>
+        <div className="member-tree-list">
+          {roots.length ? roots.map((agent) => <MemberNode key={agent.id} agent={agent} />) : <Empty t={t} />}
+        </div>
+      </Card>
+      <Card>
+        <div className="section-head"><h3>{t('memberDetails')}</h3>{selectedAgent && <StatusBadge t={t} status={selectedAgent.status} />}</div>
+        {selectedAgent ? (
+          <>
+            <div className="detail-grid">
+              <span>{t('agentCode')}</span><strong>{selectedAgent.agentCode}</strong>
+              <span>{t('name')}</span><strong>{selectedAgent.name}</strong>
+              <span>{t('email')}</span><strong>{selectedAgent.email}</strong>
+              <span>{t('phone')}</span><strong>{selectedAgent.phone || selectedAgent.profile?.phone || '-'}</strong>
+              <span>{t('owner')}</span><strong>{ownerNameText(t, selectedAgent.ownerAdminId, selectedAgent.ownerName)}</strong>
+              <span>{t('sponsor')}</span><strong>{selectedAgent.sponsor?.agentCode || '-'}</strong>
+              <span>{t('balance')}</span><strong>{money(selectedAgent.balance)}</strong>
+              <span>{t('annualFeeReminder')}</span><strong>{selectedAgent.annualFeeDaysLeft} {t('days')}</strong>
+              <span>{t('createdAt')}</span><strong>{dateText(selectedAgent.createdAt)}</strong>
+            </div>
+            <div className="tree-note muted">{t('memberTreeNoStatsHint')}</div>
+          </>
+        ) : <Empty t={t} />}
+      </Card>
     </div>
   )
 }
@@ -1249,6 +1391,7 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
   const warmupStartedRef = useRef(false)
   const [loading, setLoading] = useState({})
   const [error, setError] = useState('')
+  const [teamRefreshToken, setTeamRefreshToken] = useState(0)
 
   useEffect(() => { dataRef.current = data }, [data])
 
@@ -1375,7 +1518,7 @@ function AgentHome({ t, data, reload }) {
   const agent = data.me.agent
   const adminContact = data.me.adminContact || { whatsapp: data.me.adminWhatsapp }
   const annualFeeAmount = data.me.annualFeeAmount
-  const whatsappMessage = buildAdminWhatsappMessage(adminContact.whatsappText, { amount: annualFeeAmount, agentCode: agent.agentCode, agentName: agent.name })
+  const whatsappMessage = buildAdminWhatsappMessage(adminContact.whatsappText, { amount: annualFeeAmount, agentCode: agent.agentCode, agentName: agent.name, fallbackTemplate: t('defaultAnnualFeeWhatsappText') })
   const whatsappUrl = buildWhatsappUrl(adminContact.whatsapp, whatsappMessage)
   return (
     <>

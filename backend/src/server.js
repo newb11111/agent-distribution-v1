@@ -507,6 +507,55 @@ app.get('/api/admin/dashboard', requireAdmin, requireOfficeAdmin, requireAdminPe
   } catch (err) { next(err) }
 })
 
+
+app.get('/api/admin/member-tree', requireAdmin, requireOfficeAdmin, requireAdminPermission('agents'), async (req, res, next) => {
+  try {
+    const scoped = scopedAgentsWhere(req.admin, 'a')
+    const params = [...scoped.params]
+    let ownerSql = ''
+    const requestedOwner = cleanText(req.query.ownerAdminId)
+    if (req.admin.role === 'SUPER_ADMIN' && requestedOwner && requestedOwner !== 'ALL') {
+      params.push(requestedOwner)
+      ownerSql = `AND a.owner_admin_id = $${params.length}`
+    }
+    let searchSql = ''
+    const search = cleanText(req.query.search).toLowerCase()
+    if (search) {
+      params.push(`%${search}%`)
+      const i = params.length
+      searchSql = `AND (LOWER(a.agent_code) LIKE $${i} OR LOWER(a.referral_code) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.email) LIKE $${i} OR LOWER(a.status) LIKE $${i} OR LOWER(COALESCE(a.profile->>'phone','')) LIKE $${i} OR LOWER(COALESCE(au.name,'')) LIKE $${i} OR LOWER(COALESCE(s.agent_code,'')) LIKE $${i})`
+    }
+    const result = await query(
+      `SELECT
+          a.*,
+          s.agent_code AS sponsor_agent_code,
+          s.name AS sponsor_name,
+          CASE WHEN a.owner_admin_id='admin_super' THEN 'HQ / Super Admin' ELSE COALESCE(au.name, a.owner_admin_id, 'HQ / Super Admin') END AS owner_name,
+          COALESCE(b.balance,0)::numeric AS balance
+       FROM sales_advisers a
+       LEFT JOIN sales_advisers s ON s.id=a.sponsor_agent_id
+       LEFT JOIN admin_users au ON au.id=a.owner_admin_id
+       LEFT JOIN (
+         SELECT agent_id, COALESCE(SUM(amount),0)::numeric AS balance
+         FROM reward_ledger
+         WHERE status='POSTED'
+         GROUP BY agent_id
+       ) b ON b.agent_id=a.id
+       WHERE ${scoped.sql} ${ownerSql} ${searchSql}
+       ORDER BY a.owner_admin_id ASC, a.created_at ASC`,
+      params
+    )
+    const agents = result.rows.map((row) => toAgent(row, {
+      balance: Number(row.balance || 0),
+      annualFeeDaysLeft: daysLeft(row.annual_fee_expires_at),
+      phone: jsonValue(row.profile, {}).phone || '',
+      ownerName: row.owner_name,
+      sponsor: row.sponsor_agent_id ? { id: row.sponsor_agent_id, agentCode: row.sponsor_agent_code, name: row.sponsor_name } : null
+    }))
+    res.json({ agents, ownerOptions: [{ id: 'ALL', name: 'All Admins' }, ...(await ownerOptions())] })
+  } catch (err) { next(err) }
+})
+
 app.get('/api/admin/agents', requireAdmin, requireOfficeAdmin, requireAdminPermission('agents'), async (req, res, next) => {
   try {
     const { page, limit, offset, search } = pageParams(req, 50, 100)
