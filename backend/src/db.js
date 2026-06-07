@@ -248,6 +248,47 @@ export async function initDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_withdrawals_agent ON withdrawals(agent_id);
 
+
+
+    CREATE TABLE IF NOT EXISTS planters (
+      id TEXT PRIMARY KEY,
+      phone TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      name TEXT NOT NULL,
+      farm_name TEXT NOT NULL DEFAULT '',
+      farm_address TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      profile JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_planters_created ON planters(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_planters_status ON planters(status);
+
+    CREATE TABLE IF NOT EXISTS harvest_requests (
+      id TEXT PRIMARY KEY,
+      planter_id TEXT NOT NULL REFERENCES planters(id) ON DELETE RESTRICT,
+      fruit_type TEXT NOT NULL DEFAULT '',
+      estimated_weight NUMERIC(12,2) NOT NULL DEFAULT 0,
+      maturity_status TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      phone TEXT NOT NULL DEFAULT '',
+      latitude NUMERIC(10,7),
+      longitude NUMERIC(10,7),
+      location_accuracy NUMERIC(12,2),
+      location_address TEXT NOT NULL DEFAULT '',
+      photos JSONB NOT NULL DEFAULT '[]'::jsonb,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      admin_remark TEXT NOT NULL DEFAULT '',
+      reviewed_by_admin_id TEXT REFERENCES admin_users(id) ON DELETE SET NULL,
+      reviewed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_harvest_requests_planter_created ON harvest_requests(planter_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_harvest_requests_status_created ON harvest_requests(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_harvest_requests_created ON harvest_requests(created_at DESC);
+
     CREATE TABLE IF NOT EXISTS audit_logs (
       id TEXT PRIMARY KEY,
       actor_type TEXT NOT NULL,
@@ -282,6 +323,16 @@ export async function initDatabase() {
       AND (c.from_agent_id IS NULL OR c.owner_admin_id = 'admin_super')
   `)
   await query(`ALTER TABLE commission_rules DROP CONSTRAINT IF EXISTS commission_rules_kind_generation_key`)
+
+
+  await query(`ALTER TABLE planters ADD COLUMN IF NOT EXISTS farm_name TEXT NOT NULL DEFAULT ''`)
+  await query(`ALTER TABLE planters ADD COLUMN IF NOT EXISTS farm_address TEXT NOT NULL DEFAULT ''`)
+  await query(`ALTER TABLE planters ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ACTIVE'`)
+  await query(`ALTER TABLE planters ADD COLUMN IF NOT EXISTS profile JSONB NOT NULL DEFAULT '{}'::jsonb`)
+  await query(`ALTER TABLE harvest_requests ADD COLUMN IF NOT EXISTS phone TEXT NOT NULL DEFAULT ''`)
+  await query(`ALTER TABLE harvest_requests ADD COLUMN IF NOT EXISTS location_address TEXT NOT NULL DEFAULT ''`)
+  await query(`ALTER TABLE harvest_requests ADD COLUMN IF NOT EXISTS photos JSONB NOT NULL DEFAULT '[]'::jsonb`)
+  await query(`ALTER TABLE harvest_requests ADD COLUMN IF NOT EXISTS admin_remark TEXT NOT NULL DEFAULT ''`)
 
   await query(`CREATE INDEX IF NOT EXISTS idx_sales_advisers_owner ON sales_advisers(owner_admin_id)`)
   await query(`CREATE INDEX IF NOT EXISTS idx_sales_advisers_owner_created ON sales_advisers(owner_admin_id, created_at DESC)`)

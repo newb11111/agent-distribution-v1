@@ -12,6 +12,10 @@ export function signAgentToken(agent) {
   return jwt.sign({ type: 'agent', id: agent.id }, JWT_SECRET, { expiresIn: TOKEN_EXPIRES_IN })
 }
 
+export function signPlanterToken(planter) {
+  return jwt.sign({ type: 'planter', id: planter.id }, JWT_SECRET, { expiresIn: TOKEN_EXPIRES_IN })
+}
+
 function getBearerToken(req) {
   const auth = req.headers.authorization || ''
   return auth.startsWith('Bearer ') ? auth.slice(7) : ''
@@ -27,6 +31,22 @@ export async function requireAdmin(req, res, next) {
     const row = result.rows[0]
     if (!row) return res.status(401).json({ error: 'UNAUTHORIZED' })
     req.admin = toAdmin(row)
+    next()
+  } catch {
+    return res.status(401).json({ error: 'UNAUTHORIZED' })
+  }
+}
+
+export async function requirePlanter(req, res, next) {
+  try {
+    const token = getBearerToken(req)
+    if (!token) return res.status(401).json({ error: 'UNAUTHORIZED' })
+    const payload = jwt.verify(token, JWT_SECRET)
+    if (payload.type !== 'planter') return res.status(401).json({ error: 'UNAUTHORIZED' })
+    const result = await query('SELECT * FROM planters WHERE id=$1 AND status=$2', [payload.id, 'ACTIVE'])
+    const row = result.rows[0]
+    if (!row) return res.status(401).json({ error: 'UNAUTHORIZED' })
+    req.planter = toPlanter(row)
     next()
   } catch {
     return res.status(401).json({ error: 'UNAUTHORIZED' })
@@ -91,6 +111,21 @@ export function toAdmin(row) {
     scopeOwnerAdminId: row.scope_owner_admin_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  }
+}
+
+export function toPlanter(row, extra = {}) {
+  return {
+    id: row.id,
+    phone: row.phone,
+    name: row.name,
+    farmName: row.farm_name,
+    farmAddress: row.farm_address,
+    status: row.status,
+    profile: jsonValue(row.profile, {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...extra
   }
 }
 

@@ -67,7 +67,11 @@ function statusText(t, status) {
     SKIPPED_INACTIVE_COMPRESSED: 'skippedInactiveCompressed',
     WAITING_PAYMENT_APPROVAL: 'waitingPaymentApproval',
     PENDING_PACK: 'pendingPack',
-    PACKED_SHIPPED: 'packedShipped'
+    PACKED_SHIPPED: 'packedShipped',
+    SCHEDULED: 'scheduled',
+    COLLECTED: 'collected',
+    DISABLED: 'disabled',
+    DELETED: 'deleted'
   }
   return keyMap[status] ? t(keyMap[status]) : (status || '-')
 }
@@ -128,6 +132,59 @@ function Button({ children, variant = 'primary', ...props }) {
 function ErrorBox({ error }) {
   if (!error) return null
   return <div className="error-box">{error}</div>
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+async function compressImageFile(file, maxSize = 900, quality = 0.66) {
+  const raw = await readFileAsDataUrl(file)
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image()
+      image.onload = () => resolve(image)
+      image.onerror = reject
+      image.src = raw
+    })
+    const scale = Math.min(1, maxSize / Math.max(img.width || maxSize, img.height || maxSize))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round((img.width || maxSize) * scale))
+    canvas.height = Math.max(1, Math.round((img.height || maxSize) * scale))
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+    return canvas.toDataURL('image/jpeg', quality)
+  } catch {
+    return raw
+  }
+}
+
+function mapsLink(lat, lng) {
+  if (lat === null || lat === undefined || lng === null || lng === undefined) return ''
+  return `https://www.google.com/maps?q=${encodeURIComponent(`${lat},${lng}`)}`
+}
+
+function whatsappLink(phone, text = '') {
+  const clean = String(phone || '').replace(/[^0-9]/g, '')
+  if (!clean) return '#'
+  const msg = text ? `?text=${encodeURIComponent(text)}` : ''
+  return `https://wa.me/${clean}${msg}`
+}
+
+function getBrowserLocation() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error('LOCATION_NOT_SUPPORTED'))
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude, locationAccuracy: pos.coords.accuracy }),
+      () => reject(new Error('LOCATION_PERMISSION_DENIED')),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
+    )
+  })
 }
 
 const TAC_COOLDOWN_SECONDS = 600
@@ -551,7 +608,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
   }
 
   const isSuper = admin?.role === 'SUPER_ADMIN'
-  const baseTabs = ['dashboard', 'teamManagement', 'products', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
+  const baseTabs = ['dashboard', 'teamManagement', 'products', 'commissionRules', 'reward', 'withdrawals', 'orders', 'planters', 'harvestRequests', 'reports']
   const tabs = baseTabs.filter((x) => x === 'teamManagement' ? (isSuper || hasAdminPermission(admin, 'agents')) : hasAdminPermission(admin, x))
   const [tab, setTab] = useState(tabs[0] || '')
   const [data, setData] = useState({})
@@ -575,7 +632,9 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
       reward: '/api/admin/wallet-ledger',
       withdrawals: '/api/admin/withdrawals',
       orders: '/api/admin/orders',
-      reports: '/api/admin/reports/summary'
+      reports: '/api/admin/reports/summary',
+      harvestRequests: '/api/admin/harvest-requests',
+      planters: '/api/admin/planters'
     }
     return `${map[key] || map.dashboard}${query}`
   }
@@ -677,6 +736,8 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
           {tab === 'reward' && currentData && <AdminWallet t={t} wallet={currentData} pagination={currentData.pagination} reload={(params = {}) => loadTab('reward', params, true)} isSuper={isSuper} />}
           {tab === 'withdrawals' && currentData && <AdminWithdrawals t={t} withdrawals={currentData.withdrawals || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('withdrawals', params, true)} />}
           {tab === 'orders' && currentData && <AdminOrders t={t} orders={currentData.orders || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('orders', params, true)} />}
+          {tab === 'planters' && currentData && <AdminPlanters t={t} planters={currentData.planters || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('planters', params, true)} />}
+          {tab === 'harvestRequests' && currentData && <AdminHarvestRequests t={t} requests={currentData.requests || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('harvestRequests', params, true)} />}
           {tab === 'reports' && currentData && <AdminReports t={t} summary={currentData} isSuper={isSuper} />}
         </>
       )}
@@ -949,6 +1010,9 @@ function AdminUsers({ t, admins, pagination, reload }) {
 
 function FulfillmentDashboard({ lang, setLang, t, admin, onLogout }) {
   const [orders, setOrders] = useState([])
+  const [harvestRequests, setHarvestRequests] = useState([])
+  const [harvestDetail, setHarvestDetail] = useState(null)
+  const [harvestStatusForm, setHarvestStatusForm] = useState({ status: 'PENDING', adminRemark: '' })
   const [error, setError] = useState('')
   const [notice, setNotice] = useState(null)
   const [shipModal, setShipModal] = useState(null)
@@ -957,8 +1021,9 @@ function FulfillmentDashboard({ lang, setLang, t, admin, onLogout }) {
   async function load() {
     setError('')
     try {
-      const data = await api('/api/fulfillment/orders', {}, 'admin')
+      const [data, harvest] = await Promise.all([api('/api/fulfillment/orders', {}, 'admin'), api('/api/admin/harvest-requests', {}, 'admin')])
       setOrders(data.orders)
+      setHarvestRequests(harvest.requests || [])
     } catch (err) {
       setError(readableError(t, err))
       if (err.message === 'UNAUTHORIZED') onLogout()
@@ -980,6 +1045,26 @@ function FulfillmentDashboard({ lang, setLang, t, admin, onLogout }) {
     } catch (err) { showError(setNotice, t, err) }
   }
 
+
+
+  async function openHarvestDetail(row) {
+    try {
+      const data = await api(`/api/admin/harvest-requests/${row.id}`, {}, 'admin')
+      setHarvestDetail(data.request)
+      setHarvestStatusForm({ status: data.request?.status || 'PENDING', adminRemark: data.request?.adminRemark || '' })
+    } catch (err) { showError(setNotice, t, err) }
+  }
+
+  async function saveHarvestStatus() {
+    if (!harvestDetail?.id) return
+    try {
+      await api(`/api/admin/harvest-requests/${harvestDetail.id}/status`, { method: 'PATCH', body: harvestStatusForm }, 'admin')
+      setHarvestDetail(null)
+      showSuccess(setNotice, t, 'saved')
+      load()
+    } catch (err) { showError(setNotice, t, err) }
+  }
+
   useEffect(() => { load() }, [])
 
   return (
@@ -990,6 +1075,38 @@ function FulfillmentDashboard({ lang, setLang, t, admin, onLogout }) {
         <h3>{t('orders')}</h3>
         <Table><thead><tr><th>{t('orderId')}</th><th>{t('productName')}</th><th>{t('qty')}</th><th>{t('customerName')}</th><th>{t('customerPhone')}</th><th>{t('deliveryAddress')}</th><th>{t('remark')}</th><th>{t('trackingNumber')}</th><th>{t('courier')}</th><th>{t('fulfillmentStatus')}</th><th>{t('action')}</th></tr></thead><tbody>{orders.length ? orders.map((o) => <tr key={o.id}><td>{o.id.slice(-8)}</td><td>{o.product?.name}</td><td>{o.qty}</td><td>{o.customerName}</td><td>{o.customerPhone}</td><td>{o.deliveryAddress || '-'}</td><td>{o.remark || '-'}</td><td>{o.trackingNumber || '-'}</td><td>{o.courier || '-'}</td><td><StatusBadge t={t} status={o.fulfillmentStatus} /></td><td><ActionMenu t={t} actions={[{ label: t('fillTrackingAndShip'), onClick: () => openShip(o), hidden: o.fulfillmentStatus === 'PACKED_SHIPPED' }]} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
       </Card>
+
+      <Card>
+        <h3>{t('harvestRequests')}</h3>
+        <Table><thead><tr><th>{t('createdAt')}</th><th>{t('planter')}</th><th>{t('phone')}</th><th>{t('fruitType')}</th><th>{t('estimatedWeight')}</th><th>{t('location')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead><tbody>{harvestRequests.length ? harvestRequests.map((r) => {
+          const map = mapsLink(r.latitude, r.longitude)
+          return <tr key={r.id}><td>{dateText(r.createdAt)}</td><td>{r.planter?.name || '-'}</td><td>{r.phone || r.planter?.phone || '-'}</td><td>{r.fruitType || '-'}</td><td>{r.estimatedWeight} kg</td><td>{map ? <a href={map} target="_blank" rel="noreferrer">{t('openMap')}</a> : '-'}</td><td><StatusBadge t={t} status={r.status} /></td><td><ActionMenu t={t} actions={[{ label: t('view'), onClick: () => openHarvestDetail(r) }]} /></td></tr>
+        }) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+      </Card>
+      <CenterNotice open={Boolean(harvestDetail)} title={t('harvestRequestDetail')} type="info" onClose={() => setHarvestDetail(null)}>
+        {harvestDetail && <div className="modal-form">
+          <div className="detail-grid">
+            <span>{t('planter')}</span><strong>{harvestDetail.planter?.name || '-'}</strong>
+            <span>{t('phone')}</span><strong>{harvestDetail.phone || harvestDetail.planter?.phone || '-'}</strong>
+            <span>{t('farmName')}</span><strong>{harvestDetail.planter?.farmName || '-'}</strong>
+            <span>{t('fruitType')}</span><strong>{harvestDetail.fruitType || '-'}</strong>
+            <span>{t('estimatedWeight')}</span><strong>{harvestDetail.estimatedWeight} kg</strong>
+            <span>{t('location')}</span><strong>{harvestDetail.latitude}, {harvestDetail.longitude}</strong>
+            <span>{t('notes')}</span><strong>{harvestDetail.notes || '-'}</strong>
+          </div>
+          <div className="row gap wrap">
+            {mapsLink(harvestDetail.latitude, harvestDetail.longitude) && <a className="btn secondary" href={mapsLink(harvestDetail.latitude, harvestDetail.longitude)} target="_blank" rel="noreferrer">{t('openMap')}</a>}
+            <a className="btn secondary" href={whatsappLink(harvestDetail.phone || harvestDetail.planter?.phone, `${t('harvestRequests')}: ${harvestDetail.fruitType}`)} target="_blank" rel="noreferrer">{t('whatsapp')}</a>
+          </div>
+          <HarvestPhotos t={t} photos={harvestDetail.photos || []} />
+          <div className="form-grid small">
+            <Field label={t('status')}><select value={harvestStatusForm.status} onChange={(e) => setHarvestStatusForm({ ...harvestStatusForm, status: e.target.value })}><option value="PENDING">{t('pending')}</option><option value="SCHEDULED">{t('scheduled')}</option><option value="COLLECTED">{t('collected')}</option><option value="REJECTED">{t('rejected')}</option></select></Field>
+            <Field label={t('adminRemark')}><textarea value={harvestStatusForm.adminRemark} onChange={(e) => setHarvestStatusForm({ ...harvestStatusForm, adminRemark: e.target.value })} /></Field>
+          </div>
+          <div className="row gap"><Button onClick={saveHarvestStatus}>{t('save')}</Button><Button variant="secondary" onClick={() => setHarvestDetail(null)}>{t('cancel')}</Button></div>
+        </div>}
+      </CenterNotice>
+
       <CenterNotice open={Boolean(shipModal)} title={t('fillTrackingAndShip')} message={t('trackingConfirmHint')} type="info" onClose={() => setShipModal(null)}>
         <div className="modal-form">
           <Field label={t('trackingNumber')}><input value={shipForm.trackingNumber} onChange={(e) => setShipForm({ ...shipForm, trackingNumber: e.target.value })} /></Field>
@@ -1014,6 +1131,7 @@ function AdminHome({ t, data, isSuper }) {
         <StatCard label={t('activeAgents')} value={s.activeAgents} />
         <StatCard label={t('frozenAgents')} value={s.frozenAgents} />
         <StatCard label={t('pendingWithdrawals')} value={s.pendingWithdrawals} />
+        {isSuper && <StatCard label={t('pendingHarvestRequests')} value={s.pendingHarvestRequests || 0} />}
         <StatCard label={t('companyIncome')} value={money(s.totalCompanyIncome)} />
       </div>
       <Card>
@@ -1333,6 +1451,166 @@ function AdminOrders({ t, orders, pagination, reload }) {
   )
 }
 
+
+function AdminPlanters({ t, planters = [], pagination, reload }) {
+  const [search, setSearch] = useState('')
+  const [notice, setNotice] = useState(null)
+  const [modal, setModal] = useState(null)
+  const [form, setForm] = useState({ name: '', phone: '', password: '', farmName: '', farmAddress: '', status: 'ACTIVE' })
+  const runSearch = (page = 1) => reload({ search, page })
+
+  function resetForm() {
+    setForm({ name: '', phone: '', password: '', farmName: '', farmAddress: '', status: 'ACTIVE' })
+  }
+
+  function openCreate() {
+    resetForm()
+    setModal({ mode: 'create', row: null })
+  }
+
+  function openEdit(row) {
+    setForm({
+      name: row.name || '',
+      phone: row.phone || '',
+      password: '',
+      farmName: row.farmName || '',
+      farmAddress: row.farmAddress || '',
+      status: row.status || 'ACTIVE'
+    })
+    setModal({ mode: 'edit', row })
+  }
+
+  async function savePlanter() {
+    try {
+      if (modal?.mode === 'edit' && modal?.row?.id) {
+        const body = { ...form }
+        if (!body.password) delete body.password
+        await api(`/api/admin/planters/${modal.row.id}`, { method: 'PATCH', body }, 'admin')
+      } else {
+        await api('/api/admin/planters', { method: 'POST', body: form }, 'admin')
+      }
+      setModal(null)
+      resetForm()
+      showSuccess(setNotice, t, 'saved')
+      runSearch(pageOf({ pagination }).page)
+    } catch (err) { showError(setNotice, t, err) }
+  }
+
+  async function setPlanterStatus(row, status) {
+    try {
+      await api(`/api/admin/planters/${row.id}`, { method: 'PATCH', body: { ...row, status } }, 'admin')
+      showSuccess(setNotice, t, 'saved')
+      runSearch(pageOf({ pagination }).page)
+    } catch (err) { showError(setNotice, t, err) }
+  }
+
+  async function deletePlanter(row) {
+    if (!window.confirm(t('confirmDeletePlanter'))) return
+    try {
+      await api(`/api/admin/planters/${row.id}`, { method: 'DELETE' }, 'admin')
+      showSuccess(setNotice, t, 'deletedSuccess')
+      runSearch(pageOf({ pagination }).page)
+    } catch (err) { showError(setNotice, t, err) }
+  }
+
+  return (
+    <>
+      <CenterNotice open={Boolean(notice)} title={notice?.title} message={notice?.message} type={notice?.type} onClose={() => setNotice(null)} />
+      <Card>
+        <div className="section-head"><h3>{t('planterManagement')}</h3><div className="row gap wrap"><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /><Button onClick={openCreate}>{t('createPlanter')}</Button></div></div>
+        <Table><thead><tr><th>{t('planterId')}</th><th>{t('name')}</th><th>{t('phone')}</th><th>{t('farmName')}</th><th>{t('farmAddress')}</th><th>{t('harvestRequests')}</th><th>{t('status')}</th><th>{t('createdAt')}</th><th>{t('action')}</th></tr></thead><tbody>{planters.length ? planters.map((p) => <tr key={p.id}><td>{p.id}</td><td>{p.name || '-'}</td><td>{p.phone || '-'}</td><td>{p.farmName || '-'}</td><td>{p.farmAddress || '-'}</td><td>{p.harvestRequestCount || 0}</td><td><StatusBadge t={t} status={p.status} /></td><td>{dateText(p.createdAt)}</td><td><ActionMenu t={t} actions={[{ label: t('edit'), onClick: () => openEdit(p) }, { label: p.status === 'ACTIVE' ? t('disable') : t('enable'), onClick: () => setPlanterStatus(p, p.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE') }, { label: t('delete'), variant: 'danger', onClick: () => deletePlanter(p) }]} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+        <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
+      </Card>
+      <CenterNotice open={Boolean(modal)} title={modal?.mode === 'edit' ? t('editPlanter') : t('createPlanter')} type="info" onClose={() => setModal(null)}>
+        <div className="modal-form">
+          <div className="form-grid">
+            <Field label={t('name')}><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+            <Field label={t('phone')}><input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
+            <Field label={modal?.mode === 'edit' ? t('newPasswordOptional') : t('password')}><input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
+            <Field label={t('farmName')}><input value={form.farmName} onChange={(e) => setForm({ ...form, farmName: e.target.value })} /></Field>
+            <Field label={t('farmAddress')}><input value={form.farmAddress} onChange={(e) => setForm({ ...form, farmAddress: e.target.value })} /></Field>
+            <Field label={t('status')}><select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="ACTIVE">{t('active')}</option><option value="DISABLED">{t('disabled')}</option></select></Field>
+          </div>
+          <p className="muted small-text">{modal?.mode === 'edit' ? t('planterPasswordEditHint') : t('planterPasswordCreateHint')}</p>
+          <div className="row gap"><Button onClick={savePlanter}>{t('save')}</Button><Button variant="secondary" onClick={() => setModal(null)}>{t('cancel')}</Button></div>
+        </div>
+      </CenterNotice>
+    </>
+  )
+}
+
+function HarvestPhotos({ t, photos = [] }) {
+  const list = Array.isArray(photos) ? photos : []
+  if (!list.length) return <Empty t={t} />
+  return <div className="photo-grid">{list.map((src, idx) => <a key={idx} href={src} target="_blank" rel="noreferrer"><img src={src} alt={`${t('photo')} ${idx + 1}`} /></a>)}</div>
+}
+
+function AdminHarvestRequests({ t, requests = [], pagination, reload }) {
+  const [search, setSearch] = useState('')
+  const [notice, setNotice] = useState(null)
+  const [detail, setDetail] = useState(null)
+  const [statusForm, setStatusForm] = useState({ status: 'PENDING', adminRemark: '' })
+  const runSearch = (page = 1) => reload({ search, page })
+
+  async function openDetail(row) {
+    try {
+      const data = await api(`/api/admin/harvest-requests/${row.id}`, {}, 'admin')
+      setDetail(data.request)
+      setStatusForm({ status: data.request?.status || 'PENDING', adminRemark: data.request?.adminRemark || '' })
+    } catch (err) { showError(setNotice, t, err) }
+  }
+
+  async function saveStatus() {
+    if (!detail?.id) return
+    try {
+      await api(`/api/admin/harvest-requests/${detail.id}/status`, { method: 'PATCH', body: statusForm }, 'admin')
+      showSuccess(setNotice, t, 'saved')
+      const data = await api(`/api/admin/harvest-requests/${detail.id}`, {}, 'admin')
+      setDetail(data.request)
+      runSearch(pageOf({ pagination }).page)
+    } catch (err) { showError(setNotice, t, err) }
+  }
+
+  return (
+    <>
+      <CenterNotice open={Boolean(notice)} title={notice?.title} message={notice?.message} type={notice?.type} onClose={() => setNotice(null)} />
+      <Card>
+        <div className="section-head"><h3>{t('harvestRequests')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
+        <Table><thead><tr><th>{t('createdAt')}</th><th>{t('planter')}</th><th>{t('phone')}</th><th>{t('fruitType')}</th><th>{t('estimatedWeight')}</th><th>{t('maturityStatus')}</th><th>{t('location')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead><tbody>{requests.length ? requests.map((r) => {
+          const map = mapsLink(r.latitude, r.longitude)
+          return <tr key={r.id}><td>{dateText(r.createdAt)}</td><td>{r.planter?.name || '-'}</td><td>{r.phone || r.planter?.phone || '-'}</td><td>{r.fruitType || '-'}</td><td>{r.estimatedWeight} kg</td><td>{r.maturityStatus || '-'}</td><td>{map ? <a href={map} target="_blank" rel="noreferrer">{t('openMap')}</a> : '-'}</td><td><StatusBadge t={t} status={r.status} /></td><td><ActionMenu t={t} actions={[{ label: t('view'), onClick: () => openDetail(r) }]} /></td></tr>
+        }) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+        <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
+      </Card>
+      <CenterNotice open={Boolean(detail)} title={t('harvestRequestDetail')} type="info" onClose={() => setDetail(null)}>
+        {detail && <div className="modal-form">
+          <div className="detail-grid">
+            <span>{t('planter')}</span><strong>{detail.planter?.name || '-'}</strong>
+            <span>{t('farmName')}</span><strong>{detail.planter?.farmName || '-'}</strong>
+            <span>{t('farmAddress')}</span><strong>{detail.planter?.farmAddress || '-'}</strong>
+            <span>{t('phone')}</span><strong>{detail.phone || detail.planter?.phone || '-'}</strong>
+            <span>{t('fruitType')}</span><strong>{detail.fruitType || '-'}</strong>
+            <span>{t('estimatedWeight')}</span><strong>{detail.estimatedWeight} kg</strong>
+            <span>{t('maturityStatus')}</span><strong>{detail.maturityStatus || '-'}</strong>
+            <span>{t('location')}</span><strong>{detail.latitude}, {detail.longitude} {detail.locationAccuracy ? `±${Math.round(detail.locationAccuracy)}m` : ''}</strong>
+            <span>{t('notes')}</span><strong>{detail.notes || '-'}</strong>
+          </div>
+          <div className="row gap wrap">
+            {mapsLink(detail.latitude, detail.longitude) && <a className="btn secondary" href={mapsLink(detail.latitude, detail.longitude)} target="_blank" rel="noreferrer">{t('openMap')}</a>}
+            <a className="btn secondary" href={whatsappLink(detail.phone || detail.planter?.phone, `${t('harvestRequests')}: ${detail.fruitType}`)} target="_blank" rel="noreferrer">{t('whatsapp')}</a>
+          </div>
+          <HarvestPhotos t={t} photos={detail.photos || []} />
+          <div className="form-grid small">
+            <Field label={t('status')}><select value={statusForm.status} onChange={(e) => setStatusForm({ ...statusForm, status: e.target.value })}><option value="PENDING">{t('pending')}</option><option value="SCHEDULED">{t('scheduled')}</option><option value="COLLECTED">{t('collected')}</option><option value="REJECTED">{t('rejected')}</option></select></Field>
+            <Field label={t('adminRemark')}><textarea value={statusForm.adminRemark} onChange={(e) => setStatusForm({ ...statusForm, adminRemark: e.target.value })} /></Field>
+          </div>
+          <div className="row gap"><Button onClick={saveStatus}>{t('save')}</Button><Button variant="secondary" onClick={() => setDetail(null)}>{t('cancel')}</Button></div>
+        </div>}
+      </CenterNotice>
+    </>
+  )
+}
+
 function AdminReports({ t, summary, isSuper = false }) {
   const [error, setError] = useState('')
   async function download(type) {
@@ -1366,6 +1644,172 @@ function AdminReports({ t, summary, isSuper = false }) {
         </div>
       </Card>
     </>
+  )
+}
+
+
+function PlanterAuth({ lang, setLang, t, onLogin }) {
+  const [mode, setMode] = useState('login')
+  const [form, setForm] = useState({ phone: '', password: '', name: '', farmName: '', farmAddress: '' })
+  const [error, setError] = useState('')
+
+  async function submit() {
+    setError('')
+    try {
+      const path = mode === 'register' ? '/api/auth/planter-register' : '/api/auth/planter-login'
+      const data = await api(path, { method: 'POST', body: form })
+      setToken('planter', data.token)
+      onLogin(data.planter)
+    } catch (err) { setError(readableError(t, err)) }
+  }
+
+  return (
+    <Layout lang={lang} setLang={setLang} t={t} title={t('planterLogin')} right={<a className="btn secondary" href="/">{t('home')}</a>}>
+      <Card className="narrow">
+        <div className="tabs compact-tabs"><button className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>{t('login')}</button><button className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>{t('registerPlanter')}</button></div>
+        <ErrorBox error={error} />
+        {mode === 'register' && <Field label={t('name')}><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>}
+        <Field label={t('phone')}><input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="60123456789" /></Field>
+        <Field label={t('password')}><input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
+        {mode === 'register' && <>
+          <Field label={t('farmName')}><input value={form.farmName} onChange={(e) => setForm({ ...form, farmName: e.target.value })} /></Field>
+          <Field label={t('farmAddress')}><textarea value={form.farmAddress} onChange={(e) => setForm({ ...form, farmAddress: e.target.value })} /></Field>
+          <p className="muted small-text">{t('planterRegisterHint')}</p>
+        </>}
+        <Button onClick={submit}>{mode === 'register' ? t('register') : t('login')}</Button>
+      </Card>
+    </Layout>
+  )
+}
+
+function PlanterApp({ lang, setLang, t }) {
+  const [logged, setLogged] = useState(Boolean(localStorage.getItem('planter_token')))
+  const [planter, setPlanter] = useState(null)
+  const logout = () => { clearToken('planter'); setLogged(false); setPlanter(null) }
+  useEffect(() => {
+    if (!logged) return undefined
+    let alive = true
+    api('/api/planter/me', {}, 'planter')
+      .then((data) => { if (alive) setPlanter(data.planter) })
+      .catch(() => { if (alive) logout() })
+    return () => { alive = false }
+  }, [logged])
+  if (!logged) return <PlanterAuth lang={lang} setLang={setLang} t={t} onLogin={(p) => { setPlanter(p); setLogged(true) }} />
+  return <PlanterDashboard lang={lang} setLang={setLang} t={t} planter={planter} onLogout={logout} />
+}
+
+function PlanterDashboard({ lang, setLang, t, planter, onLogout }) {
+  const [requests, setRequests] = useState([])
+  const [pagination, setPagination] = useState(null)
+  const [search, setSearch] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [notice, setNotice] = useState(null)
+  const [profile, setProfile] = useState({ name: '', farmName: '', farmAddress: '' })
+  const [form, setForm] = useState({ fruitType: '', estimatedWeight: '', maturityStatus: '', notes: '', phone: '' })
+  const [photos, setPhotos] = useState([])
+  const [location, setLocation] = useState(null)
+
+  useEffect(() => {
+    if (!planter) return
+    setProfile({ name: planter.name || '', farmName: planter.farmName || '', farmAddress: planter.farmAddress || '' })
+    setForm((x) => ({ ...x, phone: x.phone || planter.phone || '' }))
+  }, [planter?.id])
+
+  async function load(page = 1) {
+    setLoading(true)
+    try {
+      const data = await api(`/api/planter/harvest-requests${buildQuery({ search, page })}`, {}, 'planter')
+      setRequests(data.requests || [])
+      setPagination(data.pagination)
+    } catch (err) { showError(setNotice, t, err) }
+    finally { setLoading(false) }
+  }
+
+  useEffect(() => { load(1) }, [])
+
+  async function pickPhotos(files) {
+    const selected = Array.from(files || []).slice(0, 5 - photos.length)
+    if (!selected.length) return
+    try {
+      const next = await Promise.all(selected.map((file) => compressImageFile(file)))
+      setPhotos((x) => [...x, ...next].slice(0, 5))
+    } catch (err) { setNotice({ title: t('operationFailed'), message: readableError(t, err), type: 'danger' }) }
+  }
+
+  async function detectLocation() {
+    try {
+      const loc = await getBrowserLocation()
+      setLocation(loc)
+      setNotice({ title: t('success'), message: t('locationCaptured'), type: 'success' })
+      return loc
+    } catch (err) {
+      setNotice({ title: t('operationFailed'), message: t(err.message || 'LOCATION_PERMISSION_DENIED'), type: 'danger' })
+      throw err
+    }
+  }
+
+  async function submitHarvest() {
+    try {
+      const loc = location || await detectLocation()
+      await api('/api/planter/harvest-requests', { method: 'POST', body: { ...form, ...loc, photos } }, 'planter')
+      setForm({ fruitType: '', estimatedWeight: '', maturityStatus: '', notes: '', phone: planter?.phone || '' })
+      setPhotos([])
+      setLocation(null)
+      showSuccess(setNotice, t, 'harvestSubmitted')
+      load(1)
+    } catch (err) {
+      if (!String(err.message || '').startsWith('LOCATION_')) showError(setNotice, t, err)
+    }
+  }
+
+  async function saveProfile() {
+    try {
+      await api('/api/planter/profile', { method: 'PATCH', body: profile }, 'planter')
+      showSuccess(setNotice, t, 'saved')
+    } catch (err) { showError(setNotice, t, err) }
+  }
+
+  const map = location ? mapsLink(location.latitude, location.longitude) : ''
+  return (
+    <Layout lang={lang} setLang={setLang} t={t} title={t('planterPortal')} subtitle={t('planterPortalSubtitle')} right={<><Button variant="secondary" onClick={() => load(1)}>{t('refresh')}</Button><Button variant="danger" onClick={onLogout}>{t('logout')}</Button></>}>
+      <CenterNotice open={Boolean(notice)} title={notice?.title} message={notice?.message} type={notice?.type} onClose={() => setNotice(null)} />
+      <div className="two-col">
+        <Card>
+          <h3>{t('newHarvestRequest')}</h3>
+          <p className="muted">{t('harvestGpsHint')}</p>
+          <div className="form-grid small">
+            <Field label={t('fruitType')}><input value={form.fruitType} onChange={(e) => setForm({ ...form, fruitType: e.target.value })} placeholder={t('fruitTypePlaceholder')} /></Field>
+            <Field label={t('estimatedWeight')}><input type="number" min="0" value={form.estimatedWeight} onChange={(e) => setForm({ ...form, estimatedWeight: e.target.value })} /></Field>
+            <Field label={t('maturityStatus')}><input value={form.maturityStatus} onChange={(e) => setForm({ ...form, maturityStatus: e.target.value })} placeholder={t('maturityPlaceholder')} /></Field>
+            <Field label={t('phone')}><input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
+            <Field label={t('notes')}><textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
+            <Field label={t('harvestPhotos')}><input type="file" accept="image/*" multiple onChange={(e) => pickPhotos(e.target.files)} /></Field>
+          </div>
+          <HarvestPhotos t={t} photos={photos} />
+          {photos.length > 0 && <Button variant="secondary" onClick={() => setPhotos([])}>{t('removePhotos')}</Button>}
+          <div className="location-card">
+            <strong>{t('location')}</strong>
+            {location ? <span>{Number(location.latitude).toFixed(6)}, {Number(location.longitude).toFixed(6)} · ±{Math.round(location.locationAccuracy || 0)}m</span> : <span className="muted">{t('locationNotCaptured')}</span>}
+            <div className="row gap wrap"><Button variant="secondary" onClick={detectLocation}>{t('detectLocation')}</Button>{map && <a className="btn secondary" href={map} target="_blank" rel="noreferrer">{t('openMap')}</a>}</div>
+          </div>
+          <Button onClick={submitHarvest}>{t('submitHarvestRequest')}</Button>
+        </Card>
+        <Card>
+          <h3>{t('planterProfile')}</h3>
+          <div className="form-grid small">
+            <Field label={t('name')}><input value={profile.name} onChange={(e) => setProfile({ ...profile, name: e.target.value })} /></Field>
+            <Field label={t('farmName')}><input value={profile.farmName} onChange={(e) => setProfile({ ...profile, farmName: e.target.value })} /></Field>
+            <Field label={t('farmAddress')}><textarea value={profile.farmAddress} onChange={(e) => setProfile({ ...profile, farmAddress: e.target.value })} /></Field>
+          </div>
+          <Button onClick={saveProfile}>{t('save')}</Button>
+        </Card>
+      </div>
+      <Card>
+        <div className="section-head"><h3>{t('myHarvestRequests')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => load(1)} /></div>
+        {loading ? <p className="muted">{t('loading')}...</p> : <Table><thead><tr><th>{t('createdAt')}</th><th>{t('fruitType')}</th><th>{t('estimatedWeight')}</th><th>{t('maturityStatus')}</th><th>{t('status')}</th><th>{t('adminRemark')}</th><th>{t('photos')}</th></tr></thead><tbody>{requests.length ? requests.map((r) => <tr key={r.id}><td>{dateText(r.createdAt)}</td><td>{r.fruitType}</td><td>{r.estimatedWeight} kg</td><td>{r.maturityStatus || '-'}</td><td><StatusBadge t={t} status={r.status} /></td><td>{r.adminRemark || '-'}</td><td><HarvestPhotos t={t} photos={r.photos || []} /></td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>}
+        <PaginationControls t={t} pagination={pagination} onPage={load} />
+      </Card>
+    </Layout>
   )
 }
 
@@ -1811,6 +2255,7 @@ function App() {
   const t = useMemo(() => createTranslator(lang), [lang])
 
   if (route.startsWith('/admin')) return <AdminApp lang={lang} setLang={setLang} t={t} />
+  if (route.startsWith('/planter')) return <PlanterApp lang={lang} setLang={setLang} t={t} />
   if (route.startsWith('/agent')) return <AgentApp lang={lang} setLang={setLang} t={t} />
   if (route.startsWith('/register')) return <Register lang={lang} setLang={setLang} t={t} />
   return <Landing lang={lang} setLang={setLang} t={t} />

@@ -32,12 +32,15 @@ import {
   requireAdminPermission,
   requireAgent,
   requireFulfillmentParty,
+  requirePlanter,
   requireSuperAdmin,
   scopedAgentsWhere,
   signAdminToken,
   signAgentToken,
+  signPlanterToken,
   toAdmin,
-  toAgent
+  toAgent,
+  toPlanter
 } from './auth.js'
 import { createOtp, normalizeEmail, verifyOtp } from './mail.js'
 import {
@@ -54,7 +57,7 @@ const PORT = Number(process.env.PORT || 5001)
 const FRONTEND_URLS = String(process.env.FRONTEND_URL || 'http://localhost:5173').split(',').map((x) => x.trim()).filter(Boolean)
 
 app.use(cors({ origin: (origin, cb) => !origin || FRONTEND_URLS.includes(origin) ? cb(null, true) : cb(new Error('CORS_BLOCKED')), credentials: true }))
-app.use(express.json({ limit: '3mb' }))
+app.use(express.json({ limit: '10mb' }))
 app.use(morgan('dev'))
 
 function cleanEmail(email) { return normalizeEmail(email) }
@@ -79,6 +82,59 @@ function rowToLedger(w) {
 }
 function rowToCompany(w) {
   return { id: w.id, ownerAdminId: w.owner_admin_id, fromAgentId: w.from_agent_id, amount: Number(w.amount || 0), sourceType: w.source_type, sourceId: w.source_id, note: w.note, createdAt: w.created_at }
+}
+
+function normalizePhone(v) {
+  return String(v || '').trim().replace(/[\s\-()]/g, '')
+}
+function rowToPlanterAdmin(r) {
+  return toPlanter(r, {
+    harvestRequestCount: Number(r.harvest_request_count || 0),
+    latestHarvestAt: r.latest_harvest_at || null
+  })
+}
+
+function rowToHarvestRequest(r, includePhotos = false) {
+  const photos = jsonValue(r.photos, [])
+  return {
+    id: r.id,
+    planterId: r.planter_id,
+    fruitType: r.fruit_type,
+    estimatedWeight: Number(r.estimated_weight || 0),
+    maturityStatus: r.maturity_status,
+    notes: r.notes,
+    phone: r.phone,
+    latitude: r.latitude === null || r.latitude === undefined ? null : Number(r.latitude),
+    longitude: r.longitude === null || r.longitude === undefined ? null : Number(r.longitude),
+    locationAccuracy: r.location_accuracy === null || r.location_accuracy === undefined ? null : Number(r.location_accuracy),
+    locationAddress: r.location_address,
+    status: r.status,
+    adminRemark: r.admin_remark,
+    reviewedByAdminId: r.reviewed_by_admin_id,
+    reviewedAt: r.reviewed_at,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    photoCount: Array.isArray(photos) ? photos.length : 0,
+    photos: includePhotos ? (Array.isArray(photos) ? photos : []) : undefined,
+    planter: r.planter_name || r.planter_phone ? {
+      id: r.planter_id,
+      name: r.planter_name,
+      phone: r.planter_phone,
+      farmName: r.farm_name,
+      farmAddress: r.farm_address
+    } : undefined
+  }
+}
+function requireHarvestAdmin(req, res, next) {
+  if (['SUPER_ADMIN', 'FULFILLMENT'].includes(req.admin?.role)) return next()
+  return res.status(403).json({ error: 'FULFILLMENT_ONLY' })
+}
+function cleanPhotos(value) {
+  const list = Array.isArray(value) ? value : []
+  return list
+    .map((x) => String(x || '').trim())
+    .filter((x) => x.startsWith('data:image/'))
+    .slice(0, 5)
 }
 
 async function nextAgentCode(client = pool) {
@@ -434,6 +490,263 @@ app.post('/api/auth/agent-login', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+
+app.post('/api/auth/planter-register', async (req, res, next) => {
+  try {
+    const phone = normalizePhone(req.body.phone)
+    const password = String(req.body.password || '')
+    const name = cleanText(req.body.name)
+    const farmName = cleanText(req.body.farmName)
+    const farmAddress = cleanText(req.body.farmAddress)
+    if (!phone || !name || password.length < 6) return res.status(400).json({ error: 'PLANTER_REGISTER_REQUIRED' })
+    const exists = await query('SELECT id FROM planters WHERE phone=$1', [phone])
+    if (exists.rowCount) return res.status(400).json({ error: 'PLANTER_PHONE_EXISTS' })
+    const id = uid('planter')
+    const hash = await bcrypt.hash(password, 12)
+    await query(
+      `INSERT INTO planters (id, phone, password_hash, name, farm_name, farm_address, status, profile)
+       VALUES ($1,$2,$3,$4,$5,$6,'ACTIVE','{}')`,
+      [id, phone, hash, name, farmName, farmAddress]
+    )
+    const row = (await query('SELECT * FROM planters WHERE id=$1', [id])).rows[0]
+    const planter = toPlanter(row)
+    await audit({ actorType: 'PLANTER', actorId: id, action: 'PLANTER_REGISTER', entityType: 'PLANTER', entityId: id })
+    res.json({ token: signPlanterToken(planter), planter })
+  } catch (err) { next(err) }
+})
+
+app.post('/api/auth/planter-login', async (req, res, next) => {
+  try {
+    const phone = normalizePhone(req.body.phone)
+    const password = String(req.body.password || '')
+    const result = await query('SELECT * FROM planters WHERE phone=$1 AND status=$2', [phone, 'ACTIVE'])
+    const row = result.rows[0]
+    if (!row) return res.status(401).json({ error: 'INVALID_PLANTER_LOGIN' })
+    const ok = await bcrypt.compare(password, row.password_hash)
+    if (!ok) return res.status(401).json({ error: 'INVALID_PLANTER_LOGIN' })
+    const planter = toPlanter(row)
+    await audit({ actorType: 'PLANTER', actorId: planter.id, action: 'PLANTER_LOGIN', entityType: 'PLANTER', entityId: planter.id })
+    res.json({ token: signPlanterToken(planter), planter })
+  } catch (err) { next(err) }
+})
+
+app.get('/api/planter/me', requirePlanter, async (req, res, next) => {
+  try {
+    const row = (await query('SELECT * FROM planters WHERE id=$1', [req.planter.id])).rows[0]
+    res.json({ planter: toPlanter(row) })
+  } catch (err) { next(err) }
+})
+
+app.patch('/api/planter/profile', requirePlanter, async (req, res, next) => {
+  try {
+    await query(
+      `UPDATE planters SET name=$2, farm_name=$3, farm_address=$4, updated_at=NOW() WHERE id=$1`,
+      [req.planter.id, cleanText(req.body.name) || req.planter.name, cleanText(req.body.farmName), cleanText(req.body.farmAddress)]
+    )
+    await audit({ actorType: 'PLANTER', actorId: req.planter.id, action: 'UPDATE_PLANTER_PROFILE', entityType: 'PLANTER', entityId: req.planter.id })
+    res.json({ ok: true })
+  } catch (err) { next(err) }
+})
+
+app.get('/api/planter/harvest-requests', requirePlanter, async (req, res, next) => {
+  try {
+    const { page, limit, offset, search } = pageParams(req, 30, 80)
+    const params = [req.planter.id]
+    let searchSql = ''
+    if (search) {
+      params.push(`%${search}%`)
+      const i = params.length
+      searchSql = `AND (LOWER(h.fruit_type) LIKE $${i} OR LOWER(h.maturity_status) LIKE $${i} OR LOWER(h.status) LIKE $${i} OR LOWER(h.notes) LIKE $${i})`
+    }
+    params.push(limit, offset)
+    const result = await query(
+      `SELECT h.*, p.name AS planter_name, p.phone AS planter_phone, p.farm_name, p.farm_address, COUNT(*) OVER() AS total_count
+       FROM harvest_requests h
+       JOIN planters p ON p.id=h.planter_id
+       WHERE h.planter_id=$1 ${searchSql}
+       ORDER BY h.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+    res.json({ requests: result.rows.map((r) => rowToHarvestRequest(r, true)), pagination: paginationMeta(result.rows[0]?.total_count || 0, page, limit) })
+  } catch (err) { next(err) }
+})
+
+app.post('/api/planter/harvest-requests', requirePlanter, async (req, res, next) => {
+  try {
+    const fruitType = cleanText(req.body.fruitType)
+    const estimatedWeight = roundMoney(req.body.estimatedWeight)
+    const maturityStatus = cleanText(req.body.maturityStatus)
+    const notes = cleanText(req.body.notes)
+    const phone = normalizePhone(req.body.phone) || req.planter.phone
+    const latitude = req.body.latitude === null || req.body.latitude === undefined || req.body.latitude === '' ? null : Number(req.body.latitude)
+    const longitude = req.body.longitude === null || req.body.longitude === undefined || req.body.longitude === '' ? null : Number(req.body.longitude)
+    const locationAccuracy = req.body.locationAccuracy === null || req.body.locationAccuracy === undefined || req.body.locationAccuracy === '' ? null : Number(req.body.locationAccuracy)
+    const locationAddress = cleanText(req.body.locationAddress)
+    const photos = cleanPhotos(req.body.photos)
+    if (!fruitType || estimatedWeight <= 0 || !phone) return res.status(400).json({ error: 'HARVEST_REQUIRED_FIELDS' })
+    if (latitude === null || longitude === null || !Number.isFinite(latitude) || !Number.isFinite(longitude)) return res.status(400).json({ error: 'LOCATION_REQUIRED' })
+    if (!photos.length) return res.status(400).json({ error: 'HARVEST_PHOTO_REQUIRED' })
+    const id = uid('harvest')
+    await query(
+      `INSERT INTO harvest_requests (id, planter_id, fruit_type, estimated_weight, maturity_status, notes, phone, latitude, longitude, location_accuracy, location_address, photos, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'PENDING')`,
+      [id, req.planter.id, fruitType, estimatedWeight, maturityStatus, notes, phone, latitude, longitude, locationAccuracy, locationAddress, JSON.stringify(photos)]
+    )
+    await audit({ actorType: 'PLANTER', actorId: req.planter.id, action: 'CREATE_HARVEST_REQUEST', entityType: 'HARVEST_REQUEST', entityId: id, metadata: { fruitType, estimatedWeight } })
+    res.json({ ok: true, id })
+  } catch (err) { next(err) }
+})
+
+app.get('/api/admin/planters', requireAdmin, requireSuperAdmin, async (req, res, next) => {
+  try {
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
+    const params = []
+    let searchSql = "WHERE p.status <> 'DELETED'"
+    if (search) {
+      params.push(`%${search}%`)
+      const i = params.length
+      searchSql += ` AND (LOWER(p.id) LIKE $${i} OR LOWER(p.name) LIKE $${i} OR LOWER(p.phone) LIKE $${i} OR LOWER(p.farm_name) LIKE $${i} OR LOWER(p.farm_address) LIKE $${i} OR LOWER(p.status) LIKE $${i})`
+    }
+    params.push(limit, offset)
+    const result = await query(
+      `SELECT p.*, COUNT(h.id)::int AS harvest_request_count, MAX(h.created_at) AS latest_harvest_at, COUNT(*) OVER() AS total_count
+       FROM planters p
+       LEFT JOIN harvest_requests h ON h.planter_id=p.id
+       ${searchSql}
+       GROUP BY p.id
+       ORDER BY p.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+    res.json({ planters: result.rows.map(rowToPlanterAdmin), pagination: paginationMeta(result.rows[0]?.total_count || 0, page, limit) })
+  } catch (err) { next(err) }
+})
+
+app.post('/api/admin/planters', requireAdmin, requireSuperAdmin, async (req, res, next) => {
+  try {
+    const phone = normalizePhone(req.body.phone)
+    const password = String(req.body.password || '')
+    const name = cleanText(req.body.name)
+    const farmName = cleanText(req.body.farmName)
+    const farmAddress = cleanText(req.body.farmAddress)
+    if (!phone || !name || password.length < 6) return res.status(400).json({ error: 'PLANTER_REGISTER_REQUIRED' })
+    const exists = await query("SELECT id FROM planters WHERE phone=$1 AND status <> 'DELETED'", [phone])
+    if (exists.rowCount) return res.status(400).json({ error: 'PLANTER_PHONE_EXISTS' })
+    const id = uid('planter')
+    const hash = await bcrypt.hash(password, 12)
+    await query(
+      `INSERT INTO planters (id, phone, password_hash, name, farm_name, farm_address, status, profile)
+       VALUES ($1,$2,$3,$4,$5,$6,'ACTIVE','{}')`,
+      [id, phone, hash, name, farmName, farmAddress]
+    )
+    await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'CREATE_PLANTER', entityType: 'PLANTER', entityId: id, metadata: { phone, name } })
+    const row = (await query('SELECT p.*, 0::int AS harvest_request_count, NULL::timestamptz AS latest_harvest_at FROM planters p WHERE p.id=$1', [id])).rows[0]
+    res.json({ ok: true, planter: rowToPlanterAdmin(row) })
+  } catch (err) { next(err) }
+})
+
+app.patch('/api/admin/planters/:id', requireAdmin, requireSuperAdmin, async (req, res, next) => {
+  try {
+    const id = cleanText(req.params.id)
+    const current = (await query("SELECT * FROM planters WHERE id=$1 AND status <> 'DELETED'", [id])).rows[0]
+    if (!current) return res.status(404).json({ error: 'PLANTER_NOT_FOUND' })
+    const phone = normalizePhone(req.body.phone) || current.phone
+    const name = cleanText(req.body.name) || current.name
+    const farmName = cleanText(req.body.farmName)
+    const farmAddress = cleanText(req.body.farmAddress)
+    const status = ['ACTIVE', 'DISABLED'].includes(String(req.body.status || '').toUpperCase()) ? String(req.body.status).toUpperCase() : current.status
+    const password = String(req.body.password || '')
+    const dup = await query("SELECT id FROM planters WHERE phone=$1 AND id<>$2 AND status <> 'DELETED'", [phone, id])
+    if (dup.rowCount) return res.status(400).json({ error: 'PLANTER_PHONE_EXISTS' })
+    if (password && password.length < 6) return res.status(400).json({ error: 'PASSWORD_MIN_6' })
+    if (password) {
+      const hash = await bcrypt.hash(password, 12)
+      await query(
+        `UPDATE planters SET phone=$2, name=$3, farm_name=$4, farm_address=$5, status=$6, password_hash=$7, updated_at=NOW() WHERE id=$1`,
+        [id, phone, name, farmName, farmAddress, status, hash]
+      )
+    } else {
+      await query(
+        `UPDATE planters SET phone=$2, name=$3, farm_name=$4, farm_address=$5, status=$6, updated_at=NOW() WHERE id=$1`,
+        [id, phone, name, farmName, farmAddress, status]
+      )
+    }
+    await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'UPDATE_PLANTER', entityType: 'PLANTER', entityId: id, metadata: { status } })
+    const row = (await query(
+      `SELECT p.*, COUNT(h.id)::int AS harvest_request_count, MAX(h.created_at) AS latest_harvest_at
+       FROM planters p LEFT JOIN harvest_requests h ON h.planter_id=p.id WHERE p.id=$1 GROUP BY p.id`,
+      [id]
+    )).rows[0]
+    res.json({ ok: true, planter: rowToPlanterAdmin(row) })
+  } catch (err) { next(err) }
+})
+
+app.delete('/api/admin/planters/:id', requireAdmin, requireSuperAdmin, async (req, res, next) => {
+  try {
+    const result = await query("UPDATE planters SET status='DELETED', updated_at=NOW() WHERE id=$1 AND status <> 'DELETED' RETURNING id", [req.params.id])
+    if (!result.rowCount) return res.status(404).json({ error: 'PLANTER_NOT_FOUND' })
+    await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'DELETE_PLANTER', entityType: 'PLANTER', entityId: req.params.id })
+    res.json({ ok: true })
+  } catch (err) { next(err) }
+})
+
+app.get('/api/admin/harvest-requests', requireAdmin, requireHarvestAdmin, async (req, res, next) => {
+  try {
+    const { page, limit, offset, search } = pageParams(req, 50, 100)
+    const params = []
+    let searchSql = ''
+    if (search) {
+      params.push(`%${search}%`)
+      const i = params.length
+      searchSql = `WHERE (LOWER(h.id) LIKE $${i} OR LOWER(h.fruit_type) LIKE $${i} OR LOWER(h.maturity_status) LIKE $${i} OR LOWER(h.status) LIKE $${i} OR LOWER(p.name) LIKE $${i} OR LOWER(p.phone) LIKE $${i} OR LOWER(p.farm_name) LIKE $${i})`
+    }
+    params.push(limit, offset)
+    const result = await query(
+      `SELECT h.*, p.name AS planter_name, p.phone AS planter_phone, p.farm_name, p.farm_address, COUNT(*) OVER() AS total_count
+       FROM harvest_requests h
+       JOIN planters p ON p.id=h.planter_id
+       ${searchSql}
+       ORDER BY h.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+    res.json({ requests: result.rows.map((r) => rowToHarvestRequest(r, false)), pagination: paginationMeta(result.rows[0]?.total_count || 0, page, limit) })
+  } catch (err) { next(err) }
+})
+
+app.get('/api/admin/harvest-requests/:id', requireAdmin, requireHarvestAdmin, async (req, res, next) => {
+  try {
+    const result = await query(
+      `SELECT h.*, p.name AS planter_name, p.phone AS planter_phone, p.farm_name, p.farm_address
+       FROM harvest_requests h
+       JOIN planters p ON p.id=h.planter_id
+       WHERE h.id=$1`,
+      [req.params.id]
+    )
+    const row = result.rows[0]
+    if (!row) return res.status(404).json({ error: 'HARVEST_REQUEST_NOT_FOUND' })
+    res.json({ request: rowToHarvestRequest(row, true) })
+  } catch (err) { next(err) }
+})
+
+app.patch('/api/admin/harvest-requests/:id/status', requireAdmin, requireHarvestAdmin, async (req, res, next) => {
+  try {
+    const status = ['PENDING', 'SCHEDULED', 'COLLECTED', 'REJECTED'].includes(String(req.body.status || '').toUpperCase()) ? String(req.body.status).toUpperCase() : 'PENDING'
+    const remark = cleanText(req.body.adminRemark)
+    const result = await query(
+      `UPDATE harvest_requests
+       SET status=$2, admin_remark=$3, reviewed_by_admin_id=$4, reviewed_at=NOW(), updated_at=NOW()
+       WHERE id=$1
+       RETURNING id`,
+      [req.params.id, status, remark, req.admin.id]
+    )
+    if (!result.rowCount) return res.status(404).json({ error: 'HARVEST_REQUEST_NOT_FOUND' })
+    await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'UPDATE_HARVEST_STATUS', entityType: 'HARVEST_REQUEST', entityId: req.params.id, metadata: { status } })
+    res.json({ ok: true })
+  } catch (err) { next(err) }
+})
+
 app.get('/api/config', async (req, res, next) => {
   try {
     
@@ -447,7 +760,7 @@ app.get('/api/admin/dashboard', requireAdmin, requireOfficeAdmin, requireAdminPe
     const scoped = scopedAgentsWhere(req.admin, 'a')
     const companyScoped = scopedCompanyLedgerWhere(req.admin, 'c', 'ca')
     const recentScoped = scopedAgentsWhere(req.admin, 'ra')
-    const [agentStats, proofs, withdrawals, company, recent] = await Promise.all([
+    const [agentStats, proofs, withdrawals, company, recent, harvestPending] = await Promise.all([
       query(
         `SELECT
            COUNT(*)::int AS total_agents,
@@ -486,7 +799,8 @@ app.get('/api/admin/dashboard', requireAdmin, requireOfficeAdmin, requireAdminPe
          ORDER BY c.created_at DESC
          LIMIT 20`,
         recentScoped.params
-      )
+      ),
+      query(`SELECT COUNT(*)::int AS n FROM harvest_requests WHERE status='PENDING'`)
     ])
 
     const statsRow = agentStats.rows[0] || {}
@@ -497,6 +811,7 @@ app.get('/api/admin/dashboard', requireAdmin, requireOfficeAdmin, requireAdminPe
         frozenAgents: Number(statsRow.frozen_agents || 0),
         pendingProofs: safeCountRow(proofs),
         pendingWithdrawals: safeCountRow(withdrawals),
+        pendingHarvestRequests: safeCountRow(harvestPending),
         totalCompanyIncome: Number(company.rows[0]?.total || 0)
       },
       recentCommissions: recent.rows.map((r) => ({ id: r.id, generation: r.generation, sourceType: r.source_type, amount: Number(r.amount), status: r.status }))
@@ -930,7 +1245,7 @@ app.post('/api/admin/withdrawals/:id/mark-paid', requireAdmin, requireOfficeAdmi
   try {
     const result = await tx(async (client) => {
       const w = (await client.query('SELECT * FROM withdrawals WHERE id=$1 FOR UPDATE', [req.params.id])).rows[0]
-      if (!w) throw new Error('WITHDRAWAL_NOT_FOUND')
+      if (!w) throw new Error('WITHDRAWAL_NOT_FOUND', 'HARVEST_REQUEST_NOT_FOUND')
       if (!(await canAccessAgent(req.admin, w.agent_id))) throw new Error('NO_SCOPE')
       if (w.status !== 'PENDING') return { alreadyReviewed: true }
       await client.query('UPDATE withdrawals SET status=$2, reviewed_by_admin_id=$3, paid_at=NOW() WHERE id=$1', [w.id, 'PAID', req.admin.id])
@@ -945,7 +1260,7 @@ app.post('/api/admin/withdrawals/:id/reject', requireAdmin, requireOfficeAdmin, 
   try {
     await tx(async (client) => {
       const w = (await client.query('SELECT * FROM withdrawals WHERE id=$1 FOR UPDATE', [req.params.id])).rows[0]
-      if (!w) throw new Error('WITHDRAWAL_NOT_FOUND')
+      if (!w) throw new Error('WITHDRAWAL_NOT_FOUND', 'HARVEST_REQUEST_NOT_FOUND')
       if (!(await canAccessAgent(req.admin, w.agent_id))) throw new Error('NO_SCOPE')
       if (w.status !== 'PENDING') return
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`agent-balance:${w.agent_id}`])
@@ -1283,8 +1598,8 @@ app.post('/api/agent/withdrawals', requireAgent, async (req, res, next) => {
 app.use((err, req, res, next) => {
   const message = err?.message || 'SERVER_ERROR'
   const status = ['NO_SCOPE', 'NO_PERMISSION', 'SUPER_ADMIN_ONLY', 'OFFICE_ADMIN_ONLY'].includes(message) ? 403
-    : ['UNAUTHORIZED', 'INVALID_LOGIN'].includes(message) ? 401
-    : ['AGENT_NOT_FOUND', 'PRODUCT_NOT_FOUND', 'PROOF_NOT_FOUND', 'ORDER_NOT_FOUND', 'WITHDRAWAL_NOT_FOUND'].includes(message) ? 404
+    : ['UNAUTHORIZED', 'INVALID_LOGIN', 'INVALID_PLANTER_LOGIN'].includes(message) ? 401
+    : ['AGENT_NOT_FOUND', 'PRODUCT_NOT_FOUND', 'PROOF_NOT_FOUND', 'ORDER_NOT_FOUND', 'WITHDRAWAL_NOT_FOUND', 'HARVEST_REQUEST_NOT_FOUND', 'PLANTER_NOT_FOUND'].includes(message) ? 404
     : 400
   console.error(message, err.details || '')
   res.status(status).json({

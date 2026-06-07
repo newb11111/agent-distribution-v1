@@ -41,7 +41,9 @@ export function StatusBadge({ status, t }) {
     SKIPPED_INACTIVE_COMPRESSED: 'skippedInactiveCompressed',
     WAITING_PAYMENT_APPROVAL: 'waitingPaymentApproval',
     PENDING_PACK: 'pendingPack',
-    PACKED_SHIPPED: 'packedShipped'
+    PACKED_SHIPPED: 'packedShipped',
+    SCHEDULED: 'scheduled',
+    COLLECTED: 'collected'
   }
   const label = t && keyMap[status] ? t(keyMap[status]) : (status || '-')
   return <span className={`badge ${cls}`}>{label}</span>
