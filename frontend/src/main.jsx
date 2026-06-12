@@ -506,7 +506,8 @@ function TacLogin({ t, mode, onSuccess }) {
     try {
       const data = await api('/api/auth/agent-login', { method: 'POST', body: { email, tac } })
       setToken('agent', data.token)
-      onSuccess()
+      if (data.agent) localStorage.setItem('agent_profile', JSON.stringify(data.agent))
+      onSuccess(data.agent || null)
     } catch (err) {
       setError(err.message)
     }
@@ -550,6 +551,7 @@ function Register({ lang, setLang, t }) {
     try {
       const data = await api('/api/auth/register', { method: 'POST', body: form })
       setToken('agent', data.token)
+      if (data.agent) localStorage.setItem('agent_profile', JSON.stringify(data.agent))
       setSuccess(t('registeredSubmitAnnualFee'))
       window.location.href = '/agent'
     } catch (err) {
@@ -666,7 +668,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
     ].filter((item) => item.key !== currentKey && tabs.includes(item.key) && hasAdminPermission(admin, item.key))
 
     runWhenIdle(async () => {
-      await delay(1500)
+      await delay(3000)
       for (const item of preloadPlan) {
         if (!dataRef.current[item.key]) {
           await loadTab(item.key, item.params, false, { background: true }).catch(() => null)
@@ -942,6 +944,8 @@ function AdminUsers({ t, admin, admins, pagination, reload }) {
   const [passwordModal, setPasswordModal] = useState(null)
   const [newPassword, setNewPassword] = useState('')
   const [notice, setNotice] = useState(null)
+  const [subAdminModalOpen, setSubAdminModalOpen] = useState(false)
+  const [subAdminForm, setSubAdminForm] = useState({ code: '', password: '', name: '' })
 
   function updateRole(role) {
     setForm({ ...form, role, permissions: role === 'FULFILLMENT' ? ['fulfillmentOrders'] : DEFAULT_LEADER_PERMISSIONS })
@@ -951,6 +955,18 @@ function AdminUsers({ t, admin, admins, pagination, reload }) {
     try {
       await api('/api/admin/admin-users', { method: 'POST', body: form }, 'admin')
       setForm({ code: '', password: '', name: '', role: defaultCreateRole, permissions: DEFAULT_LEADER_PERMISSIONS })
+      showSuccess(setNotice, t, 'saved')
+      runSearch(1)
+    } catch (err) { showError(setNotice, t, err) }
+  }
+
+  async function createSubAdmin() {
+    try {
+      const code = String(subAdminForm.code || '').trim()
+      const password = String(subAdminForm.password || '')
+      await api('/api/admin/admin-users', { method: 'POST', body: { code, password, name: String(subAdminForm.name || '').trim() || code, role: 'SUB_ADMIN', permissions: DEFAULT_LEADER_PERMISSIONS } }, 'admin')
+      setSubAdminModalOpen(false)
+      setSubAdminForm({ code: '', password: '', name: '' })
       showSuccess(setNotice, t, 'saved')
       runSearch(1)
     } catch (err) { showError(setNotice, t, err) }
@@ -997,6 +1013,26 @@ function AdminUsers({ t, admin, admins, pagination, reload }) {
   return (
     <>
       <CenterNotice open={Boolean(notice)} title={notice?.title} message={notice?.message} type={notice?.type} onClose={() => setNotice(null)} />
+      <CenterNotice open={subAdminModalOpen} title={t('createSubAdmin')} message={t('createSubAdminHint')} type="info" onClose={() => setSubAdminModalOpen(false)}>
+        <div className="modal-form">
+          <Field label={t('subAdminId')}><input value={subAdminForm.code} onChange={(e) => setSubAdminForm({ ...subAdminForm, code: e.target.value })} placeholder="subadmin01" /></Field>
+          <Field label={t('subAdminPassword')}><input type="password" value={subAdminForm.password} onChange={(e) => setSubAdminForm({ ...subAdminForm, password: e.target.value })} placeholder={t('passwordMinHint')} /></Field>
+          <Field label={`${t('name')} (${t('optional')})`}><input value={subAdminForm.name} onChange={(e) => setSubAdminForm({ ...subAdminForm, name: e.target.value })} /></Field>
+          <div className="row gap">
+            <Button onClick={createSubAdmin}>{t('save')}</Button>
+            <Button variant="secondary" onClick={() => setSubAdminModalOpen(false)}>{t('cancel')}</Button>
+          </div>
+        </div>
+      </CenterNotice>
+      <Card className="quick-action-card">
+        <div className="section-head">
+          <div>
+            <h3>{t('createSubAdmin')}</h3>
+            <p className="muted">{t('createSubAdminHint')}</p>
+          </div>
+          <Button onClick={() => setSubAdminModalOpen(true)}>{t('createSubAdmin')}</Button>
+        </div>
+      </Card>
       <Card>
         <h3>{t('createAdminUser')}</h3>
         <div className="form-grid">
@@ -1849,21 +1885,26 @@ function PlanterDashboard({ lang, setLang, t, planter, onLogout }) {
 
 function AgentApp({ lang, setLang, t }) {
   const [logged, setLogged] = useState(Boolean(localStorage.getItem('agent_token')))
+  const [agentProfile, setAgentProfile] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('agent_profile') || '{}') } catch { return {} }
+  })
   if (!logged) {
     return (
       <Layout lang={lang} setLang={setLang} t={t} title={t('agentLogin')} right={<a className="btn secondary" href="/">{t('home')}</a>}>
-        <TacLogin t={t} mode="agent" onSuccess={() => setLogged(true)} />
+        <TacLogin t={t} mode="agent" onSuccess={(agent) => { if (agent) setAgentProfile(agent); setLogged(true) }} />
       </Layout>
     )
   }
-  return <AgentDashboard lang={lang} setLang={setLang} t={t} onLogout={() => { clearToken('agent'); setLogged(false) }} />
+  return <AgentDashboard lang={lang} setLang={setLang} t={t} initialAgent={agentProfile} onLogout={() => { clearToken('agent'); localStorage.removeItem('agent_profile'); setAgentProfile({}); setLogged(false) }} />
 }
 
-function AgentDashboard({ lang, setLang, t, onLogout }) {
+function AgentDashboard({ lang, setLang, t, initialAgent = {}, onLogout }) {
   const tabs = ['products', 'dashboard', 'profile', 'orders', 'reward', 'withdrawals', 'team']
   const [tab, setTab] = useState('products')
-  const [data, setData] = useState({})
-  const dataRef = useRef({})
+  const initialAgentMe = initialAgent?.id ? { agent: initialAgent } : null
+  const initialData = initialAgentMe ? { me: initialAgentMe } : {}
+  const [data, setData] = useState(initialData)
+  const dataRef = useRef(initialData)
   const inflightRef = useRef({})
   const meInflightRef = useRef(null)
   const warmupStartedRef = useRef(false)
@@ -1893,6 +1934,7 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
     if (meInflightRef.current && !force) return meInflightRef.current
     const request = api(agentPathFor('me'), {}, 'agent')
       .then((me) => {
+        if (me?.agent) localStorage.setItem('agent_profile', JSON.stringify(me.agent))
         setData((x) => {
           const next = { ...x, me }
           dataRef.current = next
@@ -1911,15 +1953,13 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
 
     const preloadPlan = [
       { key: 'dashboard', params: {} },
-      { key: 'profile', params: {} },
       { key: 'orders', params: { limit: 20 } },
-      { key: 'reward', params: {} },
-      { key: 'withdrawals', params: { limit: 20 } },
+      { key: 'reward', params: { limit: 20 } },
       { key: 'team', params: {} }
     ].filter((item) => item.key !== currentKey && tabs.includes(item.key))
 
     runWhenIdle(async () => {
-      await delay(1500)
+      await delay(3500)
       for (const item of preloadPlan) {
         if (!dataRef.current[item.key]) {
           await loadTab(item.key, item.params, false, { background: true }).catch(() => null)
@@ -1939,16 +1979,19 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
     setLoading((x) => ({ ...x, [key]: true }))
 
     const request = (async () => {
-      const needsMe = ['dashboard', 'profile', 'team', 'products', 'reward', 'withdrawals'].includes(key)
+      const needsMe = ['dashboard', 'profile', 'team'].includes(key)
       const mePayload = needsMe ? await loadMe(force && ['dashboard', 'profile'].includes(key)) : dataRef.current.me
       const payload = key === 'dashboard' || key === 'profile'
         ? mePayload
         : await api(agentPathFor(key, params), {}, 'agent')
 
       setData((x) => {
-        const next = key === 'dashboard' || key === 'profile'
+        let next = key === 'dashboard' || key === 'profile'
           ? { ...x, me: payload, [key]: payload }
           : { ...x, [key]: payload }
+        if (key === 'reward' || key === 'withdrawals') {
+          next = { ...next, reward: payload, withdrawals: payload }
+        }
         dataRef.current = next
         return next
       })
@@ -1970,10 +2013,16 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
   }
 
   useEffect(() => { loadTab(tab) }, [tab])
+  useEffect(() => {
+    if (initialAgent?.id) {
+      window.setTimeout(() => loadMe(true).catch(() => null), 4500)
+    }
+  }, [])
 
   const refreshActive = () => loadTab(tab, {}, true)
   const currentData = data[tab]
   const meData = data.me || data.dashboard || data.profile
+  const agentForView = meData?.agent || (initialAgent?.id ? initialAgent : null) || { status: 'ACTIVE', balance: 0, profile: {} }
   const isLoading = Boolean(loading[tab])
 
   return (
@@ -1995,10 +2044,10 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
           {tab === 'dashboard' && meData && <AgentHome t={t} data={{ me: meData }} reload={refreshActive} />}
           {tab === 'profile' && meData && <AgentProfile t={t} me={meData.agent} reload={refreshActive} />}
           {tab === 'team' && currentData && meData && <AgentTeam t={t} team={currentData} me={meData.agent} />}
-          {tab === 'products' && currentData && meData && <AgentProducts t={t} products={currentData.products || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('products', params, true)} agent={meData.agent} />}
+          {tab === 'products' && currentData && <AgentProducts t={t} products={currentData.products || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('products', params, true)} agent={agentForView} />}
           {tab === 'orders' && currentData && <AgentOrders t={t} orders={currentData.orders || []} pagination={currentData.pagination} reload={(params = {}) => loadTab('orders', params, true)} />}
-          {tab === 'reward' && currentData && meData && <AgentReward t={t} wallet={currentData} me={meData.agent} reload={(params = {}) => loadTab('reward', params, true)} />}
-          {tab === 'withdrawals' && currentData && meData && <AgentWithdrawals t={t} wallet={currentData} me={meData.agent} reload={(params = {}) => loadTab('withdrawals', params, true)} />}
+          {tab === 'reward' && currentData && <AgentReward t={t} wallet={currentData} me={agentForView} reload={(params = {}) => loadTab('reward', params, true)} />}
+          {tab === 'withdrawals' && currentData && <AgentWithdrawals t={t} wallet={currentData} me={agentForView} reload={(params = {}) => loadTab('withdrawals', params, true)} />}
         </>
       )}
     </Layout>
