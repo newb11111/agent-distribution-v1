@@ -152,7 +152,7 @@ export function adminDataScopeId(admin) {
   if (!admin) return null
   if (admin.role === 'SUPER_ADMIN') return 'ALL'
   if (admin.role === 'FULFILLMENT') return admin.scopeOwnerAdminId || 'ALL'
-  return admin.id
+  return admin.scopeOwnerAdminId || admin.id
 }
 
 export function scopedAgentsWhere(admin, alias = 'a') {

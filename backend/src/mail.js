@@ -20,7 +20,7 @@ export async function createOtp(email, purpose = 'LOGIN_REGISTER') {
   const clean = normalizeEmail(email)
   if (!clean || !clean.includes('@')) throw new Error('INVALID_EMAIL')
 
-  const cooldownSeconds = Number(process.env.TAC_COOLDOWN_SECONDS || 600)
+  const cooldownSeconds = Number(process.env.TAC_COOLDOWN_SECONDS || 180)
   const recent = await query(
     `SELECT created_at FROM otp_codes WHERE email=$1 AND created_at > NOW() - ($2 || ' seconds')::interval ORDER BY created_at DESC LIMIT 1`,
     [clean, String(cooldownSeconds)]

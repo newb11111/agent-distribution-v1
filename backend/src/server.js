@@ -95,7 +95,10 @@ function rowToPlanterAdmin(r) {
 }
 
 function rowToHarvestRequest(r, includePhotos = false) {
-  const photos = jsonValue(r.photos, [])
+  const photos = r.photos === undefined || r.photos === null ? [] : jsonValue(r.photos, [])
+  const photoCount = r.photo_count === undefined || r.photo_count === null
+    ? (Array.isArray(photos) ? photos.length : 0)
+    : Number(r.photo_count || 0)
   return {
     id: r.id,
     planterId: r.planter_id,
@@ -114,7 +117,7 @@ function rowToHarvestRequest(r, includePhotos = false) {
     reviewedAt: r.reviewed_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
-    photoCount: Array.isArray(photos) ? photos.length : 0,
+    photoCount,
     photos: includePhotos ? (Array.isArray(photos) ? photos : []) : undefined,
     planter: r.planter_name || r.planter_phone ? {
       id: r.planter_id,
@@ -234,7 +237,7 @@ function backgroundTask(name, fn) {
 }
 
 async function warmAdminAfterDashboard(admin) {
-  if (process.env.ENABLE_ADMIN_DASHBOARD_WARMUP === 'false') return
+  if (process.env.ENABLE_ADMIN_DASHBOARD_WARMUP !== 'true') return
   const jobs = []
 
   if (adminHasPermission(admin, 'agents')) {
@@ -320,11 +323,11 @@ async function canAccessAgent(admin, agentId) {
 
 function commissionRuleOwnerId(admin, explicitOwnerAdminId = null) {
   if (admin?.role === 'SUPER_ADMIN') return cleanText(explicitOwnerAdminId) || 'admin_super'
-  return admin?.id || 'admin_super'
+  return adminDataScopeId(admin) || 'admin_super'
 }
 
 function requireOfficeAdmin(req, res, next) {
-  if (['SUPER_ADMIN', 'LEADER'].includes(req.admin?.role)) return next()
+  if (['SUPER_ADMIN', 'LEADER', 'SUB_ADMIN'].includes(req.admin?.role)) return next()
   return res.status(403).json({ error: 'OFFICE_ADMIN_ONLY' })
 }
 
@@ -352,25 +355,60 @@ app.post('/api/auth/admin-login', async (req, res, next) => {
 
 app.get('/api/admin/me', requireAdmin, (req, res) => res.json({ admin: req.admin }))
 
-app.get('/api/admin/admin-users', requireAdmin, requireSuperAdmin, async (req, res, next) => {
+
+function canManageAdminUsers(admin) {
+  return ['SUPER_ADMIN', 'LEADER'].includes(admin?.role)
+}
+
+function requireAdminUserManager(req, res, next) {
+  if (canManageAdminUsers(req.admin)) return next()
+  return res.status(403).json({ error: 'ADMIN_USER_MANAGER_ONLY' })
+}
+
+function adminUsersScopeFilter(admin, params, search) {
+  const clauses = []
+  if (admin?.role !== 'SUPER_ADMIN') {
+    params.push(adminDataScopeId(admin))
+    clauses.push(`au.role='SUB_ADMIN' AND au.scope_owner_admin_id=$${params.length}`)
+  }
+  if (search) {
+    params.push(`%${search}%`)
+    clauses.push(`(LOWER(au.code) LIKE $${params.length} OR LOWER(au.name) LIKE $${params.length} OR LOWER(au.role) LIKE $${params.length} OR LOWER(au.status) LIKE $${params.length})`)
+  }
+  return clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+}
+
+function canAccessAdminUserTarget(actor, target) {
+  if (!actor || !target) return false
+  if (actor.role === 'SUPER_ADMIN') return true
+  if (actor.role === 'LEADER') {
+    return target.role === 'SUB_ADMIN' && target.scope_owner_admin_id === adminDataScopeId(actor)
+  }
+  return false
+}
+
+async function getAdminUserTarget(id) {
+  const existing = await query('SELECT * FROM admin_users WHERE id=$1', [id])
+  return existing.rows[0] || null
+}
+
+app.get('/api/admin/admin-users', requireAdmin, requireAdminUserManager, async (req, res, next) => {
   try {
     const { page, limit, offset, search } = pageParams(req, 50, 100)
     const params = []
-    let where = ''
-    if (search) {
-      params.push(`%${search}%`)
-      where = `WHERE LOWER(au.code) LIKE $1 OR LOWER(au.name) LIKE $1 OR LOWER(au.role) LIKE $1 OR LOWER(au.status) LIKE $1`
-    }
+    const where = adminUsersScopeFilter(req.admin, params, search)
     params.push(limit, offset)
     const result = await query(
       `SELECT au.*,
+          owner.name AS scope_owner_name,
           CASE
             WHEN au.id='admin_super' THEN (SELECT COUNT(*)::int FROM sales_advisers sa WHERE sa.owner_admin_id='admin_super')
-            WHEN au.role='LEADER' THEN (SELECT COUNT(*)::int FROM sales_advisers sa WHERE sa.owner_admin_id=au.id)
+            WHEN au.role IN ('LEADER','SUB_ADMIN') THEN (SELECT COUNT(*)::int FROM sales_advisers sa WHERE sa.owner_admin_id=au.scope_owner_admin_id)
             ELSE 0
           END AS downline_count,
           COUNT(*) OVER() AS total_count
        FROM admin_users au
+       LEFT JOIN admin_users owner ON owner.id=au.scope_owner_admin_id
        ${where}
        ORDER BY au.created_at ASC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -378,65 +416,69 @@ app.get('/api/admin/admin-users', requireAdmin, requireSuperAdmin, async (req, r
     )
     const total = result.rows[0]?.total_count || 0
     const admins = result.rows.map(toAdmin)
-    res.json({ admins: admins.map((a, idx) => ({ ...a, downlineCount: Number(result.rows[idx]?.downline_count || 0), passwordHash: undefined })), pagination: paginationMeta(total, page, limit) })
+    res.json({ admins: admins.map((a, idx) => ({ ...a, scopeOwnerName: result.rows[idx]?.scope_owner_name || '', downlineCount: Number(result.rows[idx]?.downline_count || 0), passwordHash: undefined })), pagination: paginationMeta(total, page, limit) })
   } catch (err) { next(err) }
 })
 
-app.post('/api/admin/admin-users', requireAdmin, requireSuperAdmin, async (req, res, next) => {
+app.post('/api/admin/admin-users', requireAdmin, requireAdminUserManager, async (req, res, next) => {
   try {
     const code = cleanText(req.body.code)
     const password = String(req.body.password || '')
     const name = cleanText(req.body.name) || code
-    const role = req.body.role === 'FULFILLMENT' ? 'FULFILLMENT' : 'LEADER'
+    const requestedRole = String(req.body.role || '').toUpperCase()
+    const role = req.admin.role === 'SUPER_ADMIN'
+      ? (['LEADER', 'SUB_ADMIN', 'FULFILLMENT'].includes(requestedRole) ? requestedRole : 'LEADER')
+      : 'SUB_ADMIN'
     if (!code || password.length < 6) return res.status(400).json({ error: 'CODE_AND_PASSWORD_REQUIRED' })
-    const id = uid(role === 'LEADER' ? 'leader' : 'fulfillment')
+
+    const id = uid(role === 'LEADER' ? 'leader' : (role === 'FULFILLMENT' ? 'fulfillment' : 'subadmin'))
     const permissions = normalizeAdminPermissions(role, req.body.permissions)
     const hash = await bcrypt.hash(password, 12)
-    const scope = role === 'LEADER' ? id : (req.body.scopeOwnerAdminId || 'ALL')
+    let scope = 'ALL'
+    if (role === 'LEADER') scope = id
+    if (role === 'SUB_ADMIN') scope = req.admin.role === 'SUPER_ADMIN' ? (cleanText(req.body.scopeOwnerAdminId) || 'admin_super') : adminDataScopeId(req.admin)
+    if (role === 'FULFILLMENT') scope = req.admin.role === 'SUPER_ADMIN' ? (cleanText(req.body.scopeOwnerAdminId) || 'ALL') : adminDataScopeId(req.admin)
     await query(
       `INSERT INTO admin_users (id, code, password_hash, name, role, permissions, status, scope_owner_admin_id)
        VALUES ($1,$2,$3,$4,$5,$6,'ACTIVE',$7)`,
       [id, code, hash, name, role, JSON.stringify(permissions), scope]
     )
-    // Normal Admins now start with empty independent commission/contact settings.
-    // They no longer inherit or copy Super Admin settings.
-    await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'CREATE_ADMIN_USER', entityType: 'ADMIN_USER', entityId: id, metadata: { role, permissions } })
+    await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'CREATE_ADMIN_USER', entityType: 'ADMIN_USER', entityId: id, metadata: { role, permissions, scopeOwnerAdminId: scope } })
     res.json({ ok: true, id })
   } catch (err) { next(err) }
 })
 
-app.patch('/api/admin/admin-users/:id/status', requireAdmin, requireSuperAdmin, async (req, res, next) => {
+app.patch('/api/admin/admin-users/:id/status', requireAdmin, requireAdminUserManager, async (req, res, next) => {
   try {
     const status = req.body.status === 'ACTIVE' ? 'ACTIVE' : 'HIDDEN'
-    if (req.params.id === 'admin_super') return res.status(400).json({ error: 'CANNOT_DISABLE_SUPER_ADMIN' })
+    const target = await getAdminUserTarget(req.params.id)
+    if (!target || target.id === 'admin_super' || !canAccessAdminUserTarget(req.admin, target)) return res.status(400).json({ error: 'INVALID_ADMIN_USER' })
     await query('UPDATE admin_users SET status=$2, updated_at=NOW() WHERE id=$1', [req.params.id, status])
     await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'UPDATE_ADMIN_STATUS', entityType: 'ADMIN_USER', entityId: req.params.id, metadata: { status } })
     res.json({ ok: true })
   } catch (err) { next(err) }
 })
 
-app.patch('/api/admin/admin-users/:id/permissions', requireAdmin, requireSuperAdmin, async (req, res, next) => {
+app.patch('/api/admin/admin-users/:id/permissions', requireAdmin, requireAdminUserManager, async (req, res, next) => {
   try {
-    const existing = await query('SELECT role FROM admin_users WHERE id=$1', [req.params.id])
-    const role = existing.rows[0]?.role
-    if (!role || role === 'SUPER_ADMIN') return res.status(400).json({ error: 'INVALID_ADMIN_USER' })
-    const permissions = normalizeAdminPermissions(role, req.body.permissions)
+    const target = await getAdminUserTarget(req.params.id)
+    if (!target || target.role === 'SUPER_ADMIN' || target.role === 'FULFILLMENT' || !canAccessAdminUserTarget(req.admin, target)) return res.status(400).json({ error: 'INVALID_ADMIN_USER' })
+    const permissions = normalizeAdminPermissions(target.role, req.body.permissions)
     await query('UPDATE admin_users SET permissions=$2, updated_at=NOW() WHERE id=$1', [req.params.id, JSON.stringify(permissions)])
     await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'UPDATE_ADMIN_PERMISSIONS', entityType: 'ADMIN_USER', entityId: req.params.id, metadata: { permissions } })
     res.json({ ok: true })
   } catch (err) { next(err) }
 })
 
-app.patch('/api/admin/admin-users/:id/password', requireAdmin, requireSuperAdmin, async (req, res, next) => {
+app.patch('/api/admin/admin-users/:id/password', requireAdmin, requireAdminUserManager, async (req, res, next) => {
   try {
     const password = String(req.body.password || '')
     if (password.length < 6) return res.status(400).json({ error: 'PASSWORD_MIN_6' })
-    const existing = await query('SELECT role FROM admin_users WHERE id=$1', [req.params.id])
-    const role = existing.rows[0]?.role
-    if (!role || role === 'SUPER_ADMIN') return res.status(400).json({ error: 'INVALID_ADMIN_USER' })
+    const target = await getAdminUserTarget(req.params.id)
+    if (!target || target.role === 'SUPER_ADMIN' || !canAccessAdminUserTarget(req.admin, target)) return res.status(400).json({ error: 'INVALID_ADMIN_USER' })
     const hash = await bcrypt.hash(password, 12)
     await query('UPDATE admin_users SET password_hash=$2, updated_at=NOW() WHERE id=$1', [req.params.id, hash])
-    await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'UPDATE_ADMIN_PASSWORD', entityType: 'ADMIN_USER', entityId: req.params.id, metadata: { role } })
+    await audit({ actorType: 'ADMIN', actorId: req.admin.id, action: 'UPDATE_ADMIN_PASSWORD', entityType: 'ADMIN_USER', entityId: req.params.id, metadata: { role: target.role } })
     res.json({ ok: true })
   } catch (err) { next(err) }
 })
@@ -703,7 +745,30 @@ app.get('/api/admin/harvest-requests', requireAdmin, requireHarvestAdmin, async 
     }
     params.push(limit, offset)
     const result = await query(
-      `SELECT h.*, p.name AS planter_name, p.phone AS planter_phone, p.farm_name, p.farm_address, COUNT(*) OVER() AS total_count
+      `SELECT
+         h.id,
+         h.planter_id,
+         h.fruit_type,
+         h.estimated_weight,
+         h.maturity_status,
+         h.notes,
+         h.phone,
+         h.latitude,
+         h.longitude,
+         h.location_accuracy,
+         h.location_address,
+         h.status,
+         h.admin_remark,
+         h.reviewed_by_admin_id,
+         h.reviewed_at,
+         h.created_at,
+         h.updated_at,
+         CASE WHEN jsonb_typeof(h.photos) = 'array' THEN jsonb_array_length(h.photos) ELSE 0 END::int AS photo_count,
+         p.name AS planter_name,
+         p.phone AS planter_phone,
+         p.farm_name,
+         p.farm_address,
+         COUNT(*) OVER() AS total_count
        FROM harvest_requests h
        JOIN planters p ON p.id=h.planter_id
        ${searchSql}
@@ -1597,7 +1662,7 @@ app.post('/api/agent/withdrawals', requireAgent, async (req, res, next) => {
 
 app.use((err, req, res, next) => {
   const message = err?.message || 'SERVER_ERROR'
-  const status = ['NO_SCOPE', 'NO_PERMISSION', 'SUPER_ADMIN_ONLY', 'OFFICE_ADMIN_ONLY'].includes(message) ? 403
+  const status = ['NO_SCOPE', 'NO_PERMISSION', 'SUPER_ADMIN_ONLY', 'OFFICE_ADMIN_ONLY', 'ADMIN_USER_MANAGER_ONLY'].includes(message) ? 403
     : ['UNAUTHORIZED', 'INVALID_LOGIN', 'INVALID_PLANTER_LOGIN'].includes(message) ? 401
     : ['AGENT_NOT_FOUND', 'PRODUCT_NOT_FOUND', 'PROOF_NOT_FOUND', 'ORDER_NOT_FOUND', 'WITHDRAWAL_NOT_FOUND', 'HARVEST_REQUEST_NOT_FOUND', 'PLANTER_NOT_FOUND'].includes(message) ? 404
     : 400

@@ -4,8 +4,8 @@ import bcrypt from 'bcryptjs'
 import crypto from 'crypto'
 
 export const ADMIN_PERMISSION_KEYS = ['dashboard', 'agents', 'products', 'paymentProofs', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
-export const LEADER_PERMISSION_KEYS = ['dashboard', 'agents', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
-export const DEFAULT_LEADER_PERMISSIONS = ['dashboard', 'agents', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
+export const LEADER_PERMISSION_KEYS = ['dashboard', 'agents', 'products', 'paymentProofs', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
+export const DEFAULT_LEADER_PERMISSIONS = ['dashboard', 'agents', 'products', 'paymentProofs', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
 
 const connectionString = process.env.DATABASE_URL
 if (!connectionString) {
@@ -82,7 +82,7 @@ export async function initDatabase() {
       code TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       name TEXT NOT NULL,
-      role TEXT NOT NULL CHECK (role IN ('SUPER_ADMIN','LEADER','FULFILLMENT')),
+      role TEXT NOT NULL CHECK (role IN ('SUPER_ADMIN','LEADER','SUB_ADMIN','FULFILLMENT')),
       permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
       status TEXT NOT NULL DEFAULT 'ACTIVE',
       scope_owner_admin_id TEXT NOT NULL DEFAULT 'ALL',
@@ -105,6 +105,22 @@ export async function initDatabase() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'admin_users_role_check'
+          AND conrelid = 'admin_users'::regclass
+      ) THEN
+        ALTER TABLE admin_users DROP CONSTRAINT admin_users_role_check;
+      END IF;
+      ALTER TABLE admin_users
+        ADD CONSTRAINT admin_users_role_check
+        CHECK (role IN ('SUPER_ADMIN','LEADER','SUB_ADMIN','FULFILLMENT'));
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END $$;
 
     CREATE INDEX IF NOT EXISTS idx_sales_advisers_sponsor ON sales_advisers(sponsor_agent_id);
     CREATE TABLE IF NOT EXISTS otp_codes (

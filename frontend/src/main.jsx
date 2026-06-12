@@ -187,7 +187,20 @@ function getBrowserLocation() {
   })
 }
 
-const TAC_COOLDOWN_SECONDS = 600
+const TAC_COOLDOWN_SECONDS = 180
+
+function delay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+function runWhenIdle(fn, timeout = 5000) {
+  if (typeof window === 'undefined') return
+  if ('requestIdleCallback' in window) {
+    window.requestIdleCallback(fn, { timeout })
+  } else {
+    window.setTimeout(fn, Math.min(timeout, 2500))
+  }
+}
 
 function tacCooldownKey(value) {
   const email = String(value || '').trim().toLowerCase()
@@ -410,13 +423,13 @@ function ActionMenu({ t, actions = [] }) {
 }
 
 
-const ADMIN_PERMISSION_KEYS = ['dashboard', 'agents', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
-const DEFAULT_LEADER_PERMISSIONS = ['dashboard', 'agents', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
+const ADMIN_PERMISSION_KEYS = ['dashboard', 'agents', 'products', 'paymentProofs', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
+const DEFAULT_LEADER_PERMISSIONS = ['dashboard', 'agents', 'products', 'paymentProofs', 'commissionRules', 'reward', 'withdrawals', 'orders', 'reports']
 const REPORT_TYPES = ['orders', 'commissions', 'rewardLedger', 'withdrawals', 'salesAdvisers', 'companyLedger']
 
 function hasAdminPermission(admin, key) {
   if (admin?.role === 'SUPER_ADMIN') return true
-  if (admin?.role === 'LEADER' && !ADMIN_PERMISSION_KEYS.includes(key)) return false
+  if (['LEADER', 'SUB_ADMIN'].includes(admin?.role) && !ADMIN_PERMISSION_KEYS.includes(key)) return false
   return Array.isArray(admin?.permissions) && admin.permissions.includes(key)
 }
 
@@ -598,7 +611,7 @@ function AdminApp({ lang, setLang, t }) {
   }, [logged])
 
   if (!logged) return <AdminLogin lang={lang} setLang={setLang} t={t} onLogin={(profile) => { setAdmin(profile || {}); setLogged(true) }} />
-  if (checking) return <Layout lang={lang} setLang={setLang} t={t}><Card>{t('loading')}...</Card></Layout>
+  if (checking && !admin?.id) return <Layout lang={lang} setLang={setLang} t={t}><Card>{t('loading')}...</Card></Layout>
   return <AdminDashboard lang={lang} setLang={setLang} t={t} admin={admin} onLogout={logout} />
 }
 
@@ -608,9 +621,9 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
   }
 
   const isSuper = admin?.role === 'SUPER_ADMIN'
-  const baseTabs = ['dashboard', 'teamManagement', 'products', 'commissionRules', 'reward', 'withdrawals', 'orders', 'planters', 'harvestRequests', 'reports']
-  const tabs = baseTabs.filter((x) => x === 'teamManagement' ? (isSuper || hasAdminPermission(admin, 'agents')) : hasAdminPermission(admin, x))
-  const [tab, setTab] = useState(tabs[0] || '')
+  const baseTabs = ['products', 'dashboard', 'teamManagement', 'commissionRules', 'reports', 'planters', 'orders', 'withdrawals', 'reward', 'harvestRequests']
+  const tabs = baseTabs.filter((x) => x === 'teamManagement' ? (isSuper || admin?.role === 'LEADER' || hasAdminPermission(admin, 'agents')) : hasAdminPermission(admin, x))
+  const [tab, setTab] = useState(() => tabs.includes('products') ? 'products' : (tabs[0] || ''))
   const [data, setData] = useState({})
   const dataRef = useRef({})
   const inflightRef = useRef({})
@@ -639,14 +652,27 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
     return `${map[key] || map.dashboard}${query}`
   }
 
-  function scheduleAdminWarmup() {
+  function scheduleAdminWarmup(currentKey = tab) {
     if (warmupStartedRef.current) return
     warmupStartedRef.current = true
-    const warmupTabs = tabs.filter((key) => key !== 'dashboard')
-    warmupTabs.forEach((key, index) => {
-      window.setTimeout(() => {
-        loadTab(key, {}, false, { background: true }).catch(() => null)
-      }, 250 + (index * 250))
+
+    const preloadPlan = [
+      { key: 'commissionRules', params: {} },
+      { key: 'reports', params: {} },
+      { key: 'dashboard', params: {} },
+      { key: 'planters', params: { limit: 20 } },
+      { key: 'orders', params: { limit: 20 } },
+      { key: 'withdrawals', params: { limit: 20 } }
+    ].filter((item) => item.key !== currentKey && tabs.includes(item.key) && hasAdminPermission(admin, item.key))
+
+    runWhenIdle(async () => {
+      await delay(1500)
+      for (const item of preloadPlan) {
+        if (!dataRef.current[item.key]) {
+          await loadTab(item.key, item.params, false, { background: true }).catch(() => null)
+        }
+        await delay(800)
+      }
     })
   }
 
@@ -670,7 +696,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
           dataRef.current = next
           return next
         })
-        if (key === 'dashboard') scheduleAdminWarmup()
+        if (!options.background) scheduleAdminWarmup(key)
         return payload
       })
       .catch((err) => {
@@ -688,7 +714,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
   }
 
   useEffect(() => { if (tab && tab !== 'teamManagement') loadTab(tab) }, [tab])
-  useEffect(() => { if (!tabs.includes(tab)) setTab(tabs[0] || '') }, [admin?.permissions?.join(','), admin?.role])
+  useEffect(() => { if (!tabs.includes(tab)) setTab(tabs.includes('products') ? 'products' : (tabs[0] || '')) }, [admin?.permissions?.join(','), admin?.role])
 
   if (!tabs.length) {
     return (
@@ -696,7 +722,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
         lang={lang}
         setLang={setLang}
         t={t}
-        title={isSuper ? t('superAdminHq') : t('LEADER')}
+        title={isSuper ? t('superAdminHq') : roleText(t, admin?.role || 'LEADER')}
         right={<Button variant="danger" onClick={onLogout}>{t('logout')}</Button>}
       >
         <Card>{t('noAdminPermission')}</Card>
@@ -719,7 +745,7 @@ function AdminDashboard({ lang, setLang, t, admin, onLogout }) {
       lang={lang}
       setLang={setLang}
       t={t}
-      title={isSuper ? t('superAdminHq') : t('LEADER')}
+      title={isSuper ? t('superAdminHq') : roleText(t, admin?.role || 'LEADER')}
       right={<><Button variant="secondary" onClick={refreshActive}>{t('refresh')}</Button><Button variant="danger" onClick={onLogout}>{t('logout')}</Button></>}
       navTabs={tabs}
       activeTab={tab}
@@ -766,7 +792,12 @@ function PermissionChecklist({ t, value, onChange, disabled = false }) {
 
 
 function AdminTeamManagement({ t, admin, isSuper, refreshToken = 0 }) {
-  const innerTabs = isSuper ? ['adminUsers', 'agents', 'memberTree'] : ['agents', 'memberTree']
+  const canManageAdminUsers = isSuper || admin?.role === 'LEADER'
+  const canManageAgents = isSuper || hasAdminPermission(admin, 'agents')
+  const innerTabs = [
+    ...(canManageAdminUsers ? ['adminUsers'] : []),
+    ...(canManageAgents ? ['agents', 'memberTree'] : [])
+  ]
   const [innerTab, setInnerTab] = useState(innerTabs[0])
   const [data, setData] = useState({})
   const [loading, setLoading] = useState(false)
@@ -812,7 +843,7 @@ function AdminTeamManagement({ t, admin, isSuper, refreshToken = 0 }) {
       <ErrorBox error={error} />
       {loading && !current ? <Card>{t('loading')}...</Card> : (
         <>
-          {innerTab === 'adminUsers' && isSuper && current && <AdminUsers t={t} admins={current.admins || []} pagination={current.pagination} reload={(params = {}) => loadInner('adminUsers', params)} />}
+          {innerTab === 'adminUsers' && canManageAdminUsers && current && <AdminUsers t={t} admin={admin} admins={current.admins || []} pagination={current.pagination} reload={(params = {}) => loadInner('adminUsers', params)} />}
           {innerTab === 'agents' && current && <AdminAgents t={t} agents={current.agents || []} pagination={current.pagination} ownerOptions={current.ownerOptions || []} admin={admin} reload={(params = {}) => loadInner('agents', params)} />}
           {innerTab === 'memberTree' && current && <AdminMemberTree t={t} tree={current} reload={(params = {}) => loadInner('memberTree', params)} isSuper={isSuper} />}
         </>
@@ -900,10 +931,13 @@ function AdminMemberTree({ t, tree, reload, isSuper }) {
   )
 }
 
-function AdminUsers({ t, admins, pagination, reload }) {
+function AdminUsers({ t, admin, admins, pagination, reload }) {
+  const isSuper = admin?.role === 'SUPER_ADMIN'
+  const defaultCreateRole = isSuper ? 'LEADER' : 'SUB_ADMIN'
+  const roleOptions = isSuper ? ['LEADER', 'SUB_ADMIN', 'FULFILLMENT'] : ['SUB_ADMIN']
   const [search, setSearch] = useState('')
   const runSearch = (page = 1) => reload({ search, page })
-  const [form, setForm] = useState({ code: '', password: '', name: '', role: 'LEADER', permissions: DEFAULT_LEADER_PERMISSIONS })
+  const [form, setForm] = useState({ code: '', password: '', name: '', role: defaultCreateRole, permissions: DEFAULT_LEADER_PERMISSIONS })
   const [permissionModal, setPermissionModal] = useState(null)
   const [passwordModal, setPasswordModal] = useState(null)
   const [newPassword, setNewPassword] = useState('')
@@ -916,7 +950,7 @@ function AdminUsers({ t, admins, pagination, reload }) {
   async function create() {
     try {
       await api('/api/admin/admin-users', { method: 'POST', body: form }, 'admin')
-      setForm({ code: '', password: '', name: '', role: 'LEADER', permissions: DEFAULT_LEADER_PERMISSIONS })
+      setForm({ code: '', password: '', name: '', role: defaultCreateRole, permissions: DEFAULT_LEADER_PERMISSIONS })
       showSuccess(setNotice, t, 'saved')
       runSearch(1)
     } catch (err) { showError(setNotice, t, err) }
@@ -969,20 +1003,20 @@ function AdminUsers({ t, admins, pagination, reload }) {
           <Field label={t('adminCode')}><input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} /></Field>
           <Field label={t('password')}><input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
           <Field label={t('name')}><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-          <Field label={t('role')}><select key={`create-role-${roleText(t, 'LEADER')}-${roleText(t, 'FULFILLMENT')}`} value={form.role} onChange={(e) => updateRole(e.target.value)}><option value="LEADER">{roleText(t, 'LEADER')}</option><option value="FULFILLMENT">{roleText(t, 'FULFILLMENT')}</option></select></Field>
+          <Field label={t('role')}><select key={`create-role-${roleOptions.join('-')}`} value={form.role} onChange={(e) => updateRole(e.target.value)}>{roleOptions.map((role) => <option key={role} value={role}>{roleText(t, role)}</option>)}</select></Field>
         </div>
-        {form.role === 'LEADER' && <PermissionChecklist t={t} value={form.permissions} onChange={(permissions) => setForm({ ...form, permissions })} />}
+        {['LEADER', 'SUB_ADMIN'].includes(form.role) && <PermissionChecklist t={t} value={form.permissions} onChange={(permissions) => setForm({ ...form, permissions })} />}
         <Button onClick={create}>{t('save')}</Button>
       </Card>
       <Card>
         <div className="section-head"><h3>{t('adminUsers')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
         <Table><thead><tr><th>{t('adminCode')}</th><th>{t('name')}</th><th>{t('role')}</th><th>{t('ownerScope')}</th><th>{t('downlineCount')}</th><th>{t('status')}</th><th>{t('action')}</th></tr></thead><tbody>{admins.map((a) => {
           const actions = [
-            { label: t('permissions'), variant: 'secondary', onClick: () => openPermissions(a), hidden: a.role !== 'LEADER' },
+            { label: t('permissions'), variant: 'secondary', onClick: () => openPermissions(a), hidden: !['LEADER', 'SUB_ADMIN'].includes(a.role) },
             { label: t('changePassword'), variant: 'secondary', onClick: () => openPassword(a), hidden: a.role === 'SUPER_ADMIN' },
             { label: a.status === 'ACTIVE' ? t('hidden') : t('active'), onClick: () => setStatus(a.id, a.status === 'ACTIVE' ? 'HIDDEN' : 'ACTIVE'), hidden: a.role === 'SUPER_ADMIN' }
           ]
-          return <tr key={a.id}><td>{a.code}</td><td>{a.name}</td><td>{roleText(t, a.role)}</td><td>{a.role === 'SUPER_ADMIN' ? t('hqOwner') : ownerNameText(t, a.scopeOwnerAdminId, a.name)}</td><td>{a.downlineCount ?? 0}</td><td><StatusBadge t={t} status={a.status} /></td><td><ActionMenu t={t} actions={actions} /></td></tr>
+          return <tr key={a.id}><td>{a.code}</td><td>{a.name}</td><td>{roleText(t, a.role)}</td><td>{a.role === 'SUPER_ADMIN' ? t('hqOwner') : ownerNameText(t, a.scopeOwnerAdminId, a.scopeOwnerName || a.name)}</td><td>{a.downlineCount ?? 0}</td><td><StatusBadge t={t} status={a.status} /></td><td><ActionMenu t={t} actions={actions} /></td></tr>
         })}</tbody></Table>
         <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
       </Card>
@@ -1826,8 +1860,8 @@ function AgentApp({ lang, setLang, t }) {
 }
 
 function AgentDashboard({ lang, setLang, t, onLogout }) {
-  const tabs = ['dashboard', 'profile', 'team', 'products', 'orders', 'reward', 'withdrawals']
-  const [tab, setTab] = useState('dashboard')
+  const tabs = ['products', 'dashboard', 'profile', 'orders', 'reward', 'withdrawals', 'team']
+  const [tab, setTab] = useState('products')
   const [data, setData] = useState({})
   const dataRef = useRef({})
   const inflightRef = useRef({})
@@ -1871,14 +1905,27 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
     return request
   }
 
-  function scheduleAgentWarmup() {
+  function scheduleAgentWarmup(currentKey = tab) {
     if (warmupStartedRef.current) return
     warmupStartedRef.current = true
-    const warmupTabs = tabs.filter((key) => !['dashboard', 'profile'].includes(key))
-    warmupTabs.forEach((key, index) => {
-      window.setTimeout(() => {
-        loadTab(key, {}, false, { background: true }).catch(() => null)
-      }, 250 + (index * 250))
+
+    const preloadPlan = [
+      { key: 'dashboard', params: {} },
+      { key: 'profile', params: {} },
+      { key: 'orders', params: { limit: 20 } },
+      { key: 'reward', params: {} },
+      { key: 'withdrawals', params: { limit: 20 } },
+      { key: 'team', params: {} }
+    ].filter((item) => item.key !== currentKey && tabs.includes(item.key))
+
+    runWhenIdle(async () => {
+      await delay(1500)
+      for (const item of preloadPlan) {
+        if (!dataRef.current[item.key]) {
+          await loadTab(item.key, item.params, false, { background: true }).catch(() => null)
+        }
+        await delay(800)
+      }
     })
   }
 
@@ -1905,7 +1952,7 @@ function AgentDashboard({ lang, setLang, t, onLogout }) {
         dataRef.current = next
         return next
       })
-      if (key === 'dashboard') scheduleAgentWarmup()
+      if (!options.background) scheduleAgentWarmup(key)
       return payload
     })()
       .catch((err) => {
