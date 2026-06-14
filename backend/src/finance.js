@@ -128,9 +128,27 @@ export async function allocateCommission(client, { fromAgentId, baseAmount, sour
   const ruleOwnerAdminId = ownerAdminId || fromAgent.owner_admin_id || 'admin_super'
   const rules = await getRules(client, kind, ruleOwnerAdminId)
   const { chain, skipped } = await getUplineChain(client, fromAgentId, maxLevels, { compressInactive: true })
+
+  // Safety guard: annual-fee activation must not silently succeed with zero/empty rules
+  // when there are active uplines to pay. This prevents cases where the agent becomes ACTIVE
+  // but commission rows are empty and the whole fee goes into company_ledger.
+  if (kind === 'annualFee' && chain.length > 0) {
+    const hasPositiveMatchingRule = chain.some((item) => {
+      const rule = rules.find((r) => Number(r.generation) === Number(item.level))
+      return Number(rule?.value || 0) > 0
+    })
+    if (!hasPositiveMatchingRule) {
+      const err = new Error('ANNUAL_FEE_COMMISSION_RULES_NOT_SET')
+      err.details = { ownerAdminId: ruleOwnerAdminId, fromAgentId, sourceType: cleanSourceType, sourceId: cleanSourceId }
+      throw err
+    }
+  }
+
   let totalPaid = 0
   let totalSkipped = 0
   const rows = []
+  const paidRows = []
+  const skippedRows = []
 
   const selfRule = rules.find((r) => Number(r.generation) === 0)
   const selfAmount = Math.min(calculateCommission(cleanBaseAmount, selfRule), cleanBaseAmount)
@@ -148,6 +166,7 @@ export async function allocateCommission(client, { fromAgentId, baseAmount, sour
       ]
     )
     rows.push(commissionId)
+    paidRows.push({ id: commissionId, fromAgentId, toAgentId: fromAgentId, generation: 0, amount: selfAmount, ruleType: selfRule?.type || 'percent', ruleValue: Number(selfRule?.value || 0) })
     await creditAgent(client, {
       agentId: fromAgentId,
       amount: selfAmount,
@@ -173,6 +192,7 @@ export async function allocateCommission(client, { fromAgentId, baseAmount, sour
       ]
     )
     rows.push(commissionId)
+    skippedRows.push({ id: commissionId, fromAgentId, toAgentId: item.agent.id, naturalLevel: item.naturalLevel, amount: 0, status: 'SKIPPED_INACTIVE_COMPRESSED' })
     totalSkipped += 1
   }
 
@@ -200,6 +220,7 @@ export async function allocateCommission(client, { fromAgentId, baseAmount, sour
       ]
     )
     rows.push(commissionId)
+    paidRows.push({ id: commissionId, fromAgentId, toAgentId: item.agent.id, generation: item.level, naturalLevel: item.naturalLevel, compressedFromLevel: item.compressedFromLevel, amount, ruleType: rule?.type || 'percent', ruleValue: Number(rule?.value || 0) })
 
     await creditAgent(client, {
       agentId: item.agent.id,
@@ -219,7 +240,7 @@ export async function allocateCommission(client, { fromAgentId, baseAmount, sour
   if (companyNet > 0) {
     await creditCompany(client, { amount: companyNet, sourceType: cleanSourceType, sourceId: cleanSourceId, note: 'Company net after paid commissions', ownerAdminId: ruleOwnerAdminId, fromAgentId })
   }
-  const summary = { totalPaid, totalForfeited, totalSkipped, companyNet, rows, compressionEnabled: true }
+  const summary = { totalPaid, totalForfeited, totalSkipped, companyNet, rows, paidRows, skippedRows, ruleOwnerAdminId, compressionEnabled: true }
   await client.query(
     `INSERT INTO financial_transactions (id, source_type, source_id, base_amount, summary)
      VALUES ($1,$2,$3,$4,$5)

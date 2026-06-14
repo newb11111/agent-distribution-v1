@@ -78,10 +78,32 @@ function rowToWithdrawal(w) {
   return { id: w.id, agentId: w.agent_id, amount: Number(w.amount || 0), bankSnapshot: jsonValue(w.bank_snapshot, {}), status: w.status, reviewedByAdminId: w.reviewed_by_admin_id, createdAt: w.created_at, paidAt: w.paid_at, rejectedAt: w.rejected_at, rejectReason: w.reject_reason }
 }
 function rowToLedger(w) {
-  return { id: w.id, agentId: w.agent_id, type: w.type, amount: Number(w.amount || 0), sourceType: w.source_type, sourceId: w.source_id, status: w.status, note: w.note, createdByAdminId: w.created_by_admin_id, createdAt: w.created_at }
+  return {
+    id: w.id,
+    agentId: w.agent_id,
+    type: w.type,
+    amount: Number(w.amount || 0),
+    sourceType: w.source_type,
+    sourceId: w.source_id,
+    status: w.status,
+    note: w.note,
+    createdByAdminId: w.created_by_admin_id,
+    createdAt: w.created_at,
+    commission: w.commission_id ? {
+      id: w.commission_id,
+      fromAgentId: w.commission_from_agent_id,
+      toAgentId: w.commission_to_agent_id,
+      generation: Number(w.commission_generation || 0),
+      amount: Number(w.commission_amount || 0),
+      ruleType: w.commission_rule_type,
+      ruleValue: Number(w.commission_rule_value || 0),
+      status: w.commission_status
+    } : null,
+    sourceAgent: w.source_agent_code ? { id: w.source_agent_id, agentCode: w.source_agent_code, name: w.source_agent_name } : null
+  }
 }
 function rowToCompany(w) {
-  return { id: w.id, ownerAdminId: w.owner_admin_id, fromAgentId: w.from_agent_id, amount: Number(w.amount || 0), sourceType: w.source_type, sourceId: w.source_id, note: w.note, createdAt: w.created_at }
+  return { id: w.id, ownerAdminId: w.owner_admin_id, fromAgentId: w.from_agent_id, amount: Number(w.amount || 0), sourceType: w.source_type, sourceId: w.source_id, note: w.note, createdAt: w.created_at, sourceAgent: w.source_agent_code ? { id: w.source_agent_id, agentCode: w.source_agent_code, name: w.source_agent_name } : null }
 }
 
 function normalizePhone(v) {
@@ -1006,6 +1028,7 @@ app.post('/api/admin/agents', requireAdmin, requireOfficeAdmin, requireAdminPerm
       if (sponsor) {
         if (req.admin.role !== 'SUPER_ADMIN' && sponsor.owner_admin_id !== req.admin.id) throw new Error('NO_SCOPE')
         if (req.admin.role === 'SUPER_ADMIN' && ownerAdminId !== sponsor.owner_admin_id) throw new Error('SPONSOR_OWNER_MISMATCH')
+        if (!isActiveStatus(sponsor.status) || daysLeft(sponsor.annual_fee_expires_at) <= 0) throw new Error('SPONSOR_NOT_ACTIVE')
       }
       const code = await nextAgentCode(client)
       const agentId = uid('agent')
@@ -1250,14 +1273,35 @@ app.get('/api/admin/wallet-ledger', requireAdmin, requireOfficeAdmin, requireAdm
     if (search) {
       params.push(`%${search}%`)
       const i = params.length
-      searchSql = `AND (LOWER(w.type) LIKE $${i} OR LOWER(w.source_type) LIKE $${i} OR LOWER(COALESCE(w.note,'')) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.agent_code) LIKE $${i})`
+      searchSql = `AND (LOWER(w.type) LIKE $${i} OR LOWER(w.source_type) LIKE $${i} OR LOWER(COALESCE(w.note,'')) LIKE $${i} OR LOWER(a.name) LIKE $${i} OR LOWER(a.agent_code) LIKE $${i} OR LOWER(COALESCE(f.name,'')) LIKE $${i} OR LOWER(COALESCE(f.agent_code,'')) LIKE $${i})`
     }
     params.push(limit, offset)
     const [reward, company] = await Promise.all([
       query(
-        `SELECT w.*, a.name AS agent_name, a.agent_code, COUNT(*) OVER() AS total_count
+        `SELECT
+           w.*,
+           a.name AS agent_name,
+           a.agent_code,
+           c.id AS commission_id,
+           c.from_agent_id AS commission_from_agent_id,
+           c.to_agent_id AS commission_to_agent_id,
+           c.generation AS commission_generation,
+           c.amount AS commission_amount,
+           c.rule_type AS commission_rule_type,
+           c.rule_value AS commission_rule_value,
+           c.status AS commission_status,
+           f.id AS source_agent_id,
+           f.agent_code AS source_agent_code,
+           f.name AS source_agent_name,
+           COUNT(*) OVER() AS total_count
          FROM reward_ledger w
          JOIN sales_advisers a ON a.id=w.agent_id
+         LEFT JOIN commission_ledger c
+           ON c.source_type=w.source_type
+          AND c.source_id=w.source_id
+          AND c.to_agent_id=w.agent_id
+          AND c.amount=w.amount
+         LEFT JOIN sales_advisers f ON f.id=c.from_agent_id
          WHERE ${scoped.sql} ${searchSql}
          ORDER BY w.created_at DESC
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -1266,7 +1310,7 @@ app.get('/api/admin/wallet-ledger', requireAdmin, requireOfficeAdmin, requireAdm
       (() => {
         const companyScoped = scopedCompanyLedgerWhere(req.admin, 'c', 'ca')
         return query(
-          `SELECT c.*
+          `SELECT c.*, ca.id AS source_agent_id, ca.agent_code AS source_agent_code, ca.name AS source_agent_name
            FROM company_ledger c
            LEFT JOIN sales_advisers ca ON ca.id=c.from_agent_id
            WHERE ${companyScoped.sql}

@@ -371,44 +371,16 @@ export async function initDatabase() {
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_commission_rules_owner_kind_generation ON commission_rules(owner_admin_id, kind, generation)`)
 
   await seedDefaultData()
-  await clearCopiedHqDefaultsForLeaders()
+  // Do not auto-delete Leader/Admin rules. Each owner keeps their own commission settings.
+  // await clearCopiedHqDefaultsForLeaders()
 }
 
 
 async function clearCopiedHqDefaultsForLeaders() {
-  const leaders = await query("SELECT id FROM admin_users WHERE role='LEADER'")
-  const hqContactRaw = (await query("SELECT value FROM system_settings WHERE key=$1", [adminContactSettingKey('admin_super')])).rows[0]?.value
-  const hqContact = jsonValue(hqContactRaw, null)
-
-  for (const row of leaders.rows) {
-    const ownerId = row.id
-    const ownContactRaw = (await query('SELECT value FROM system_settings WHERE key=$1', [adminContactSettingKey(ownerId)])).rows[0]?.value
-    const ownContact = jsonValue(ownContactRaw, null)
-    if (hqContact && ownContact && JSON.stringify(ownContact) === JSON.stringify(hqContact)) {
-      await query('DELETE FROM system_settings WHERE key=$1', [adminContactSettingKey(ownerId)])
-    }
-
-    const sameRules = await query(
-      `WITH owner_rules AS (
-         SELECT kind, generation, type, value::numeric FROM commission_rules WHERE owner_admin_id=$1 AND generation > 0
-       ), hq_rules AS (
-         SELECT kind, generation, type, value::numeric FROM commission_rules WHERE owner_admin_id='admin_super' AND generation > 0
-       ), diff AS (
-         (SELECT * FROM owner_rules EXCEPT SELECT * FROM hq_rules)
-         UNION ALL
-         (SELECT * FROM hq_rules EXCEPT SELECT * FROM owner_rules)
-       )
-       SELECT
-         (SELECT COUNT(*)::int FROM owner_rules) AS owner_count,
-         (SELECT COUNT(*)::int FROM diff) AS diff_count`,
-      [ownerId]
-    )
-    const ownerCount = Number(sameRules.rows[0]?.owner_count || 0)
-    const diffCount = Number(sameRules.rows[0]?.diff_count || 0)
-    if (ownerCount > 0 && diffCount === 0) {
-      await query('DELETE FROM commission_rules WHERE owner_admin_id=$1', [ownerId])
-    }
-  }
+  // V2 fix: previous builds deleted Leader/Admin commission rules when they matched HQ.
+  // That caused later annual-fee activations to pay 0 commission and move all money to company_ledger.
+  // Keep the function as a safe no-op for compatibility with old imports/calls.
+  return null
 }
 
 async function seedDefaultData() {

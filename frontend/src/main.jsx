@@ -1473,10 +1473,23 @@ function AdminWallet({ t, wallet, pagination, reload, isSuper = false }) {
     <div className="two-col">
       <Card>
         <div className="section-head"><h3>{t('rewardLedger')}</h3><SearchBar t={t} value={search} onChange={setSearch} onSearch={() => runSearch(1)} /></div>
-        <Table><tbody>{rows.length ? rows.map((w) => <tr key={w.id}><td>{w.agent?.agentCode}</td><td>{ledgerTypeText(t, w.type)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table>
+        <Table>
+          <thead><tr><th>{t('receiverAgent')}</th><th>{t('sourceAgent')}</th><th>{t('type')}</th><th>{t('amount')}</th><th>{t('generation')}</th><th>{t('note')}</th><th>{t('createdAt')}</th></tr></thead>
+          <tbody>{rows.length ? rows.map((w) => (
+            <tr key={w.id}>
+              <td>{w.agent?.agentCode}</td>
+              <td>{w.sourceAgent?.agentCode || '-'}</td>
+              <td>{ledgerTypeText(t, w.type)}</td>
+              <td>{money(w.amount)}</td>
+              <td>{w.commission ? generationText(t, w.commission.generation) : '-'}</td>
+              <td>{noteText(t, w.note)}</td>
+              <td>{dateText(w.createdAt)}</td>
+            </tr>
+          )) : <tr><td><Empty t={t} /></td></tr>}</tbody>
+        </Table>
         <PaginationControls t={t} pagination={pagination} onPage={runSearch} />
       </Card>
-      <Card><h3>{t('companyLedger')}</h3><Table><tbody>{companyRows.length ? companyRows.map((w) => <tr key={w.id}><td>{sourceTypeText(t, w.sourceType)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
+      <Card><h3>{t('companyLedger')}</h3><Table><thead><tr><th>{t('sourceAgent')}</th><th>{t('type')}</th><th>{t('amount')}</th><th>{t('note')}</th><th>{t('createdAt')}</th></tr></thead><tbody>{companyRows.length ? companyRows.map((w) => <tr key={w.id}><td>{w.sourceAgent?.agentCode || '-'}</td><td>{sourceTypeText(t, w.sourceType)}</td><td>{money(w.amount)}</td><td>{noteText(t, w.note)}</td><td>{dateText(w.createdAt)}</td></tr>) : <tr><td><Empty t={t} /></td></tr>}</tbody></Table></Card>
     </div>
   )
 }
